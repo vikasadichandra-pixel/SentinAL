@@ -4,13 +4,15 @@ import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { Globe } from "./ui/Globe";
-import CountryParticles from "./ui/CountryParticles"; // Adjust path if your ui folder is structured differently
+import CountryParticles from "./ui/CountryParticles";
+import GlobeExplosion from "./ui/GlobeExplosion";
+import useGlobeRotation from "../hooks/useGlobeRotation";
 
-// --- Reverted Starry Background Particle System (Vibrant & Glowing) ---
+// --- Reverted Starry Background Particle System (Vibrant & Lightweight) ---
 const BackgroundParticles = ({ isHovered }) => {
   const pointsRef = useRef();
 
-  const particlesCount = 4000;
+  const particlesCount = 1200;
   const positions = useMemo(() => {
     const pos = new Float32Array(particlesCount * 3);
     for (let i = 0; i < particlesCount; i++) {
@@ -33,10 +35,10 @@ const BackgroundParticles = ({ isHovered }) => {
     pointsRef.current.rotation.x += delta * 0.02;
 
     if (isHovered) {
-      // Speed up the vortex rotation dramatically on hover
-      pointsRef.current.rotation.y += delta * 0.2;
-      pointsRef.current.rotation.z -= delta * 0.1;
-      pointsRef.current.scale.lerp(new THREE.Vector3(1.2, 1.2, 1.2), 0.05);
+      // Speed up the vortex rotation on hover
+      pointsRef.current.rotation.y += delta * 0.15;
+      pointsRef.current.rotation.z -= delta * 0.08;
+      pointsRef.current.scale.lerp(new THREE.Vector3(1.15, 1.15, 1.15), 0.05);
     } else {
       pointsRef.current.scale.lerp(new THREE.Vector3(1, 1, 1), 0.05);
     }
@@ -56,8 +58,8 @@ const BackgroundParticles = ({ isHovered }) => {
         size={2.5}
         color={isHovered ? "#00ffff" : "#1e3a8a"}
         transparent
-        opacity={0.6} // Reverted back to 0.6 for rich brightness
-        blending={THREE.AdditiveBlending} // Reverted back to Additive Blending for the glow effect
+        opacity={0.6}
+        blending={THREE.AdditiveBlending}
         depthWrite={false}
       />
     </points>
@@ -65,8 +67,16 @@ const BackgroundParticles = ({ isHovered }) => {
 };
 
 // --- MAIN VISUALIZER ---
-const MapVisualizer = ({ violations }) => {
+const MapVisualizer = React.memo(({ violations, explosionTarget, onFormationComplete }) => {
   const [isHovered, setIsHovered] = useState(false);
+
+  // Globe rotation control with smooth pause on threat hover
+  const {
+    autoRotateSpeed,
+    handleThreatHover,
+    handleThreatUnhover,
+    isThreatHovered,
+  } = useGlobeRotation(0.5, 4500);
 
   const arcs = useMemo(
     () =>
@@ -86,14 +96,14 @@ const MapVisualizer = ({ violations }) => {
           return {
             id: v.id || index,
             order: index + 1,
-            startLat: 19.0760,
-            startLng: 72.8777,
+            startLat: 30.7333,
+            startLng: 76.7794,
             endLat: coords.lat,
             endLng: coords.lng,
             lat: coords.lat,
             lng: coords.lng,
             color: threatColor,
-            baseColor: threatColor[2], // single solid hex for target rings
+            baseColor: threatColor[2],
             location: v.location || v.location_name || v.location_code || "Target Region",
             assetName: v.asset_name || v.movie_title || "",
             breachType: v.breach_type || v.type || "THREAT DETECTED",
@@ -111,6 +121,12 @@ const MapVisualizer = ({ violations }) => {
     >
       <div className="w-full h-full relative">
         <Canvas
+          dpr={[1, 1.5]}
+          gl={{
+            powerPreference: "high-performance",
+            antialias: true,
+            alpha: false,
+          }}
           style={{ background: "#000000" }}
           camera={{ position: [0, 0, 600], fov: 45, far: 3000 }}
         >
@@ -123,8 +139,15 @@ const MapVisualizer = ({ violations }) => {
           />
 
           <BackgroundParticles isHovered={isHovered} />
-          <CountryParticles />
-          <Globe data={arcs} />
+          <CountryParticles onFormationComplete={onFormationComplete} />
+          <Globe
+            data={arcs}
+            onThreatHover={handleThreatHover}
+            onThreatUnhover={handleThreatUnhover}
+          />
+
+          {/* Globe Explosion Effect — triggered on enforce */}
+          <GlobeExplosion target={explosionTarget} />
 
           <OrbitControls
             enablePan={false}
@@ -132,12 +155,12 @@ const MapVisualizer = ({ violations }) => {
             minDistance={20}
             maxDistance={800}
             autoRotate
-            autoRotateSpeed={isHovered ? 1.5 : 0.5}
+            autoRotateSpeed={isThreatHovered ? autoRotateSpeed : (isHovered ? 1.5 : autoRotateSpeed)}
           />
         </Canvas>
       </div>
     </div>
   );
-};
+});
 
 export default MapVisualizer;

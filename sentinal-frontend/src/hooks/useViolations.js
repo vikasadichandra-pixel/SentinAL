@@ -15,7 +15,16 @@ export default function useViolations() {
         const data = await fetchViolations();
 
         if (isMounted) {
-          setViolations(data);
+          setViolations((prev) => {
+            if (prev && data && prev.length === data.length) {
+              const unchanged = prev.every((item, idx) => {
+                const d = data[idx];
+                return d && item.id === d.id && item.status === d.status;
+              });
+              if (unchanged) return prev;
+            }
+            return data;
+          });
           setLoading(false);
           setError(null);
         }

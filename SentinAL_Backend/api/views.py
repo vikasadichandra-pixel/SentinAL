@@ -1,3 +1,4 @@
+import os
 import hashlib
 import time
 import threading
@@ -8,6 +9,7 @@ import pypdf
 
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.conf import settings
 
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
@@ -94,7 +96,7 @@ class ReportViolationView(APIView):
 
 class DashboardFeedView(ListAPIView):
     permission_classes = [AllowAny]
-    queryset = Violation.objects.filter(status='OPEN').order_by('-timestamp')
+    queryset = Violation.objects.all().order_by('-timestamp')
     serializer_class = ViolationSerializer
 
 
@@ -108,36 +110,71 @@ class EnforceViolationView(APIView):
             with transaction.atomic():
                 violation = Violation.objects.select_for_update().get(pk=pk)
                 
+                notice_filename = f"Notice_Violation_{violation.id}.pdf"
+                pdf_disk_path = os.path.join(settings.MEDIA_ROOT, 'notices', notice_filename)
+                
+                # If already enforced, ensure the PDF exists and return success
                 if violation.status == 'ENFORCED':
-                    return Response(
-                        {"status": "error", "message": "This violation has already been enforced."}, 
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                    if not os.path.exists(pdf_disk_path):
+                        notice_text = draft_legal_notice(
+                            asset_name=violation.asset_name,
+                            target_url=violation.url,
+                            breach_type=violation.breach_type,
+                            location=violation.location
+                        )
+                        generate_notice_pdf(violation.id, notice_text)
+                    
+                    try:
+                        pdf_download_url = request.build_absolute_uri(f"/media/notices/{notice_filename}")
+                    except Exception:
+                        pdf_download_url = f"/media/notices/{notice_filename}"
+
+                    return Response({
+                        "status": "success", 
+                        "message": "Takedown notice re-verified & active.",
+                        "pdf_url": pdf_download_url
+                    }, status=status.HTTP_200_OK)
                 
                 # Dynamically generate legal notice using Gemini AI
-                notice_text = draft_legal_notice(
-                    asset_name=violation.asset_name,
-                    target_url=violation.url,
-                    breach_type=violation.breach_type,
-                    location=violation.location
-                )
-                generate_notice_pdf(violation.id, notice_text)
+                try:
+                    notice_text = draft_legal_notice(
+                        asset_name=violation.asset_name,
+                        target_url=violation.url,
+                        breach_type=violation.breach_type,
+                        location=violation.location
+                    )
+                    generate_notice_pdf(violation.id, notice_text)
+                except Exception as gen_err:
+                    print(f"[!] Notice PDF generation warning: {gen_err}")
+                    # Attempt fallback generation
+                    try:
+                        fallback_text = f"SENTINAL ENFORCEMENT NOTICE\n\nAsset: {violation.asset_name}\nTarget: {violation.url}\nBreach: {violation.breach_type}\nLocation: {violation.location}\n\nThis is an official DMCA takedown notice."
+                        generate_notice_pdf(violation.id, fallback_text)
+                    except Exception:
+                        pass
 
                 violation.status = 'ENFORCED'
                 violation.save()
                 
-                pdf_download_url = request.build_absolute_uri(
-                    f"/media/notices/Notice_Violation_{violation.id}.pdf"
-                )
+                try:
+                    pdf_download_url = request.build_absolute_uri(f"/media/notices/{notice_filename}")
+                except Exception:
+                    pdf_download_url = f"/media/notices/{notice_filename}"
                 
                 return Response({
                     "status": "success", 
                     "message": "Takedown notice dispatched successfully.",
                     "pdf_url": pdf_download_url
-                })
+                }, status=status.HTTP_200_OK)
                 
         except Violation.DoesNotExist:
             return Response({"error": "Violation not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            print(f"[!] EnforceViolationView unhandled error: {e}")
+            return Response({
+                "status": "error",
+                "message": f"Enforcement processing error: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class ContractUploadView(APIView):

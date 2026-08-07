@@ -1,4 +1,5 @@
 import os
+import html
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -87,8 +88,8 @@ def generate_notice_pdf(violation_id, legal_text):
     elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#E50914'), spaceAfter=15))
 
     # 2. Main Title
-    elements.append(Paragraph("OFFICIAL CEASE & DESIST / DMCA TAKEDOWN NOTICE", title_style))
-    elements.append(Paragraph("Issued under Section 512(c) of the Digital Millennium Copyright Act (17 U.S.C. § 512)", subtitle_style))
+    elements.append(Paragraph("OFFICIAL CEASE &amp; DESIST / DMCA TAKEDOWN NOTICE", title_style))
+    elements.append(Paragraph("Issued under Section 512(c) of the Digital Millennium Copyright Act (17 U.S.C. &sect; 512)", subtitle_style))
     elements.append(Spacer(1, 10))
 
     # 3. Body Content
@@ -103,20 +104,21 @@ def generate_notice_pdf(violation_id, legal_text):
             "Date:"
         ])
 
+        # Escape HTML entities safely first
+        escaped_p = html.escape(p.strip())
+        # Replace newlines with linebreaks
+        formatted_p = escaped_p.replace('\n', '<br/>')
+
         if is_header_block:
-            # Render header lines tightly grouped together with small spacing
-            lines = p.replace('\n', '<br/>')
-            elements.append(Paragraph(lines, ParagraphStyle(
+            elements.append(Paragraph(formatted_p, ParagraphStyle(
                 'HeaderBlock',
                 parent=body_style,
                 leading=12,
                 spaceAfter=4
             )))
         else:
-            # Standard body paragraphs and sections
-            clean_p = p.replace('\n', '<br/>').strip()
-            if clean_p:
-                elements.append(Paragraph(clean_p, body_style))
+            if formatted_p:
+                elements.append(Paragraph(formatted_p, body_style))
 
     # Build PDF
     doc.build(elements)

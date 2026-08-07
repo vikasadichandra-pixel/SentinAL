@@ -1,13 +1,19 @@
 import os
 import json
 import datetime
+import concurrent.futures
 import google.generativeai as genai
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configure the API
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# Configure the API if key is present
+api_key = os.getenv("GEMINI_API_KEY")
+if api_key:
+    try:
+        genai.configure(api_key=api_key)
+    except Exception as e:
+        print(f"[!] Gemini configure warning: {e}")
 
 def parse_contract_pdf(text_content):
     """
@@ -27,7 +33,7 @@ def parse_contract_pdf(text_content):
         Text: {text_content}
         """
         
-        model = genai.GenerativeModel('gemini-3.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         
         clean_text = response.text.replace('```json', '').replace('```', '').strip()
@@ -41,7 +47,7 @@ def parse_contract_pdf(text_content):
 def draft_legal_notice(asset_name, target_url, breach_type="PIRACY", location="UNKNOWN"):
     """
     Uses Gemini AI with dynamic system date. 
-    Includes a full-length, enterprise-grade fallback template if the API is in high demand.
+    Includes a full-length, enterprise-grade fallback template with fast timeout.
     """
     # 1. Calculate live system date
     today_date = datetime.date.today().strftime("%B %d, %Y")
@@ -101,23 +107,32 @@ enforcement@sentinalrights.com"""
     - OFFICE ADDRESS: 100 Century City Plaza, Suite 1400, Los Angeles, CA 90067
 
     STRICT REQUIREMENTS FOR THE LETTER:
-    1. DATE MANDATE: You MUST write "Date: {today_date}" in the header. Do NOT write 2023 or any past year!
+    1. DATE MANDATE: You MUST write "Date: {today_date}" in the header.
     2. EMAIL MANDATE: You MUST use 'enforcement@sentinalrights.com' in the header and signature block.
     3. LENGTH & DETAIL: The notice MUST be lengthy and include all 6 distinct sections (Header, Work ID, Material ID, Good Faith, Penalty of Perjury, Demand & Liability, Signature Block).
     4. STRICT FORMATTING: You MUST separate every paragraph and section title with DOUBLE NEWLINES (\n\n). Do NOT use markdown symbols like **, *, #, or ```. Output plain text only.
     """
 
+    def _call_gemini():
+        for model_name in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                text = response.text.strip()
+                if len(text) >= 400:
+                    return text
+            except Exception:
+                continue
+        return None
+
+    # Call Gemini in a thread with a strict 3.5-second timeout
     try:
-        model = genai.GenerativeModel("gemini-3.5-flash")
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        
-        # Validation: If AI response is unexpectedly short or empty, fallback to native template
-        if len(text) < 400:
-            return fallback_notice
-            
-        return text
-        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_call_gemini)
+            result = future.result(timeout=3.5)
+            if result:
+                return result
     except Exception as e:
-        print(f"[!] Gemini API Notice Generation Busy/Offline: {e}. Switching to high-quality native template.")
-        return fallback_notice
+        print(f"[!] Gemini Notice Generation fallback engaged ({e}). Using enterprise template.")
+
+    return fallback_notice
