@@ -17,30 +17,6 @@ function SkeletonCard({ delay = 0 }) {
   );
 }
 
-// ─── Stagger animation variants ───
-const listVariants = {
-  hidden: {},
-  visible: {
-    transition: {
-      staggerChildren: 0.06,
-    },
-  },
-};
-
-const cardVariants = {
-  hidden: { opacity: 0, y: 12, scale: 0.97 },
-  visible: {
-    opacity: 1,
-    y: 0,
-    scale: 1,
-    transition: {
-      type: "spring",
-      stiffness: 400,
-      damping: 30,
-    },
-  },
-};
-
 // ─── Breach type → CSS class mapping ───
 function getCardClass(breachType) {
   switch (breachType) {
@@ -93,70 +69,84 @@ export default function LiveThreatLog({ violations = [], selectedViolation, load
           </div>
         )}
 
-        {/* ─── Real Violation Cards with Stagger Animation ─── */}
+        {/* ─── Real Violation Cards with Live Animation ─── */}
         {!isInitialLoad && violations.length > 0 && (
-          <motion.div
-            className="space-y-2.5"
-            variants={listVariants}
-            initial="hidden"
-            animate="visible"
-          >
-            {violations.map((v) => {
-              const isSelected = selectedViolation && selectedViolation.id === v.id;
-              const isEnforced = v.status === 'ENFORCED';
+          <div className="space-y-2.5">
+            <AnimatePresence initial={false}>
+              {violations.map((v) => {
+                const isSelected = selectedViolation && selectedViolation.id === v.id;
+                const isEnforced = v.status === 'ENFORCED';
 
-              return (
-                <motion.div
-                  key={v.id}
-                  variants={cardVariants}
-                  className={`threat-card rounded-lg p-3 cursor-pointer transition-all duration-200 ${
-                    isSelected
-                      ? 'border-2 border-red-500 bg-zinc-800/95 shadow-[0_0_18px_rgba(239,68,68,0.35)]'
-                      : `border border-zinc-800/80 border-l-[3.5px] ${getBreachBorderColor(v.breach_type)} bg-zinc-900/90 hover:bg-zinc-800/70`
-                  } ${getCardClass(v.breach_type)}`}
-                  onClick={() => onSelect && onSelect(v)}
-                  whileTap={{ scale: 0.98 }}
-                >
-                  <div className="flex justify-between items-center">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span
-                        className={`text-[10px] px-2 py-0.5 rounded font-bold tracking-wider uppercase badge-glow flex-shrink-0 ${getBadgeGlowClass(v.breach_type)} ${
-                          v.breach_type === "PIRACY" ? "bg-red-600/90 text-white" :
-                          v.breach_type === "TERRITORY" ? "bg-orange-500/90 text-white" :
-                          v.breach_type === "PRE_RELEASE" ? "bg-purple-500/90 text-white" :
-                          "bg-zinc-600 text-white"
-                        }`}
-                      >
-                        {v.breach_type || 'THREAT'}
-                      </span>
-
-                      {isEnforced && (
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-bold uppercase tracking-wider flex-shrink-0">
-                          ENFORCED
+                return (
+                  <motion.div
+                    key={v.id}
+                    layout
+                    initial={{ opacity: 0, y: 12, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.15 } }}
+                    transition={{
+                      type: "spring",
+                      stiffness: 400,
+                      damping: 30,
+                    }}
+                    className={`threat-card rounded-lg p-3 cursor-pointer transition-colors duration-200 ${
+                      isSelected
+                        ? 'border-2 border-red-500 bg-zinc-800/95 shadow-[0_0_18px_rgba(239,68,68,0.35)]'
+                        : `border border-zinc-800/80 border-l-[3.5px] ${getBreachBorderColor(v.breach_type)} bg-zinc-900/90 hover:bg-zinc-800/70`
+                    } ${getCardClass(v.breach_type)}`}
+                    onClick={() => onSelect && onSelect(v)}
+                    whileTap={{ scale: 0.98 }}
+                  >
+                    <div className="flex justify-between items-center">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className={`text-[10px] px-2 py-0.5 rounded font-bold tracking-wider uppercase badge-glow flex-shrink-0 ${getBadgeGlowClass(v.breach_type)} ${
+                            v.breach_type === "PIRACY" ? "bg-red-600/90 text-white" :
+                            v.breach_type === "TERRITORY" ? "bg-orange-500/90 text-white" :
+                            v.breach_type === "PRE_RELEASE" ? "bg-purple-500/90 text-white" :
+                            "bg-zinc-600 text-white"
+                          }`}
+                        >
+                          {v.breach_type || 'THREAT'}
                         </span>
+
+                        {isEnforced && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-bold uppercase tracking-wider flex-shrink-0">
+                            ENFORCED
+                          </span>
+                        )}
+
+                        {v.status === 'RESOLVED' && (
+                          <span
+                            data-testid={`status-badge-resolved-${v.id}`}
+                            className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold uppercase tracking-wider flex-shrink-0 flex items-center gap-0.5 shadow-[0_0_8px_rgba(16,185,129,0.25)]"
+                          >
+                            <span>✓</span> RESOLVED
+                          </span>
+                        )}
+                      </div>
+
+                      <span className="text-[10px] font-mono text-zinc-500 flex-shrink-0 ml-1">
+                        {v.timestamp ? (new Date(v.timestamp).toLocaleTimeString ? new Date(v.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : v.timestamp) : ''}
+                      </span>
+                    </div>
+
+                    <div className="mt-2 flex items-center justify-between">
+                      <p className="font-bold text-sm text-zinc-100 truncate pr-2">{v.asset_name}</p>
+                      {isSelected && (
+                        <span className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_8px_#ef4444] animate-pulse flex-shrink-0" />
                       )}
                     </div>
 
-                    <span className="text-[10px] font-mono text-zinc-500 flex-shrink-0 ml-1">
-                      {v.timestamp ? (new Date(v.timestamp).toLocaleTimeString ? new Date(v.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : v.timestamp) : ''}
-                    </span>
-                  </div>
-
-                  <div className="mt-2 flex items-center justify-between">
-                    <p className="font-bold text-sm text-zinc-100 truncate pr-2">{v.asset_name}</p>
-                    {isSelected && (
-                      <span className="w-2 h-2 rounded-full bg-red-500 shadow-[0_0_8px_#ef4444] animate-pulse flex-shrink-0" />
-                    )}
-                  </div>
-
-                  <div className="mt-1 flex items-center justify-between text-xs text-zinc-400 font-mono">
-                    <span className="truncate">Server: <strong className="text-zinc-300">{v.location}</strong></span>
-                    <span className="text-[10px] text-zinc-500 flex-shrink-0 ml-2">#{v.id}</span>
-                  </div>
-                </motion.div>
-              );
-            })}
-          </motion.div>
+                    <div className="mt-1 flex items-center justify-between text-xs text-zinc-400 font-mono">
+                      <span className="truncate">Server: <strong className="text-zinc-300">{v.location}</strong></span>
+                      <span className="text-[10px] text-zinc-500 flex-shrink-0 ml-2">#{v.id}</span>
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </AnimatePresence>
+          </div>
         )}
       </div>
     </div>

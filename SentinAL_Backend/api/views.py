@@ -1,14 +1,31 @@
 import os
+import re
 import hashlib
 import time
 import threading
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from bs4 import BeautifulSoup
-import pypdf
+
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    webdriver = None
+    Options = None
+    SELENIUM_AVAILABLE = False
+
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
 
 from django.shortcuts import get_object_or_404
 from django.db import transaction
+from django.db.models import Q
 from django.conf import settings
 
 from rest_framework.views import APIView
@@ -22,7 +39,7 @@ from rest_framework.parsers import MultiPartParser
 from ai_engine.gemini_client import parse_contract_pdf, draft_legal_notice
 from .models import Contract, Territory, Violation
 from .serializers import ContractSerializer, ViolationSerializer, CrawlerReportSerializer
-from .utils import evaluate_url_for_breach, is_safe_public_url
+from .utils import evaluate_url_for_breach, is_safe_public_url, auto_resolve_violation
 from utils.pdf_generator import generate_notice_pdf
 
 
@@ -54,7 +71,13 @@ class ReportViolationView(APIView):
         if serializer.is_valid():
             scraped_title = payload_for_serializer['asset_name']
             scraped_location = payload_for_serializer['location']
-            scraped_duration = int(payload_for_serializer['video_duration_minutes'])
+            
+            try:
+                dur_val = payload_for_serializer.get('video_duration_minutes', 0)
+                scraped_duration = int(float(dur_val)) if dur_val is not None else 0
+            except (ValueError, TypeError):
+                scraped_duration = 0
+
             video_url = scraped_data.get('video_url') or payload_for_serializer['url']
 
             # 1. Immediate Evaluation
@@ -96,8 +119,52 @@ class ReportViolationView(APIView):
 
 class DashboardFeedView(ListAPIView):
     permission_classes = [AllowAny]
-    queryset = Violation.objects.all().order_by('-timestamp')
     serializer_class = ViolationSerializer
+
+    def get_queryset(self):
+        queryset = Violation.objects.all().order_by('-timestamp')
+
+        # Real-time search query (?search=...)
+        search = self.request.query_params.get('search', '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(asset_name__icontains=search) |
+                Q(url__icontains=search) |
+                Q(location__icontains=search) |
+                Q(html_hash__icontains=search) |
+                Q(investigator_notes__icontains=search)
+            )
+
+        # Status filter (?status=OPEN, ENFORCED, RESOLVED, ALL)
+        status_param = self.request.query_params.get('status')
+        if status_param and status_param.upper() != 'ALL':
+            queryset = queryset.filter(status=status_param.upper())
+
+        # Breach / Risk level filter (?breach_type=PRE_RELEASE, PIRACY, TERRITORY, ALL)
+        breach_type_param = self.request.query_params.get('breach_type')
+        if breach_type_param and breach_type_param.upper() != 'ALL':
+            queryset = queryset.filter(breach_type=breach_type_param.upper())
+
+        # Investigation label filter (?label= or ?investigation_label=)
+        label_param = self.request.query_params.get('label') or self.request.query_params.get('investigation_label')
+        if label_param and label_param.upper() != 'ALL':
+            queryset = queryset.filter(investigation_label=label_param.upper())
+
+        # Ordering support (?ordering=-timestamp, etc.)
+        ordering_param = self.request.query_params.get('ordering')
+        if ordering_param:
+            allowed_orderings = [
+                'timestamp', '-timestamp',
+                'asset_name', '-asset_name',
+                'status', '-status',
+                'breach_type', '-breach_type',
+                'location', '-location',
+                'investigation_label', '-investigation_label'
+            ]
+            if ordering_param in allowed_orderings:
+                queryset = queryset.order_by(ordering_param)
+
+        return queryset
 
 
 class EnforceViolationView(APIView):
@@ -186,7 +253,7 @@ class ContractUploadView(APIView):
         if not pdf_file:
             return Response({"error": "pdf_file is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # FIX 5: Magic Bytes Validation (PDF Security Check)
+        # Magic Bytes Validation (PDF Security Check)
         header = pdf_file.read(5)
         pdf_file.seek(0)  # Reset file pointer after reading header
         if not header.startswith(b'%PDF-'):
@@ -234,40 +301,76 @@ class VerifyViolationView(APIView):
     def post(self, request, pk):
         violation = get_object_or_404(Violation, pk=pk)
 
-        # FIX 3: SSRF Check
+        # SSRF Check
         if not is_safe_public_url(violation.url):
             return Response(
                 {"verified": False, "error": "SSRF Guard: Target URL points to a restricted IP address."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # FIX 2: Selenium Headless Fetching (Matches Crawler Fingerprint)
-        options = Options()
-        options.add_argument("--headless")
-        options.add_argument("--log-level=3")
+        page_source = None
+        driver = None
 
+        # Attempt 1: Fast Headless Browser Fetching with Strict Resource Cleanup
         try:
+            options = Options()
+            options.add_argument("--headless")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--blink-settings=imagesEnabled=false")
+            options.add_argument("--log-level=3")
+
             driver = webdriver.Chrome(options=options)
+            driver.set_page_load_timeout(8)
+            driver.set_script_timeout(8)
             driver.get(violation.url)
-            time.sleep(1)
-            
+            time.sleep(0.5)
             page_source = driver.page_source
-            driver.quit()
+        except Exception as chrome_err:
+            print(f"[!] Selenium fetch warning for {violation.url}: {chrome_err}")
+        finally:
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
 
-            soup = BeautifulSoup(page_source, 'html.parser')
-            for element in soup(["script", "style", "iframe", "footer", "nav", "aside"]):
-                element.extract()
+        # Attempt 2: High-Speed HTTP Fallback if Selenium is unavailable
+        if not page_source:
+            try:
+                import requests
+                resp = requests.get(violation.url, timeout=5, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                if resp.ok:
+                    page_source = resp.text
+            except Exception as req_err:
+                print(f"[!] HTTP fallback fetch warning: {req_err}")
 
-            clean_text = soup.get_text(strip=True)
-            new_hash = hashlib.sha256(clean_text.encode('utf-8')).hexdigest()
-
-        except Exception as e:
+        if not page_source:
             return Response(
-                {"verified": False, "error": f"Could not re-fetch page via browser: {e}"},
+                {"verified": False, "error": "Could not re-fetch page via browser or direct HTTP."},
                 status=status.HTTP_502_BAD_GATEWAY
             )
 
-        matches = new_hash == violation.html_hash
+        try:
+            if BeautifulSoup:
+                soup = BeautifulSoup(page_source, 'html.parser')
+                for element in soup(["script", "style", "iframe", "footer", "nav", "aside"]):
+                    element.extract()
+                clean_text = soup.get_text(strip=True)
+            else:
+                clean_text = re.sub(r'<(script|style|iframe|footer|nav|aside)[^>]*>.*?</\1>', '', page_source, flags=re.DOTALL | re.IGNORECASE)
+                clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+                clean_text = ' '.join(clean_text.split())
+
+            new_hash = hashlib.sha256(clean_text.encode('utf-8')).hexdigest()
+        except Exception as parse_err:
+            return Response(
+                {"verified": False, "error": f"Failed to compute evidence hash: {parse_err}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        matches = (new_hash == violation.html_hash)
         
         return Response({
             "verified": matches,
@@ -275,3 +378,150 @@ class VerifyViolationView(APIView):
             "current_hash": new_hash,
             "note": "Page content changed since capture" if not matches else "Hash matches stored evidence",
         })
+
+
+# ═══════════════════════════════════════════════════════════════════
+# BOUNTY VIEWS — Non-destructive additions below
+# ═══════════════════════════════════════════════════════════════════
+
+class UpdateInvestigationLabelView(APIView):
+    """
+    Core Bounty: PATCH /api/violations/<id>/investigate/
+    Allows reviewers to set an investigation label and notes on a Violation.
+    Uses select_for_update() for safe concurrent writes.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        from .serializers import InvestigationLabelSerializer
+
+        serializer = InvestigationLabelSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                violation = Violation.objects.select_for_update().get(pk=pk)
+                violation.investigation_label = serializer.validated_data['investigation_label']
+                violation.investigator_notes = serializer.validated_data.get('investigator_notes', '')
+                violation.save(update_fields=['investigation_label', 'investigator_notes'])
+
+            return Response({
+                "status": "success",
+                "id": violation.id,
+                "investigation_label": violation.investigation_label,
+                "investigator_notes": violation.investigator_notes,
+            }, status=status.HTTP_200_OK)
+
+        except Violation.DoesNotExist:
+            return Response(
+                {"error": "Violation not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+
+class ExportCaseReportView(APIView):
+    """
+    Elite Bounty: GET /api/violations/<id>/export-report/
+    Generates a professional PDF Case Audit Report via ReportLab.
+    Rate-limited via ScopedRateThrottle to prevent DoS.
+    BytesIO buffer is explicitly closed in a finally block.
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'export_report'
+
+    def get(self, request, pk):
+        from django.http import FileResponse
+        from utils.report_generator import generate_case_audit_report
+
+        try:
+            # Use .only() to fetch only the fields needed for the report
+            violation = Violation.objects.only(
+                'id', 'asset_name', 'url', 'location', 'html_hash',
+                'breach_type', 'status', 'timestamp',
+                'investigation_label', 'investigator_notes'
+            ).get(pk=pk)
+        except Violation.DoesNotExist:
+            return Response(
+                {"error": "Violation not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        buffer = None
+        try:
+            buffer = generate_case_audit_report(violation)
+
+            response = FileResponse(
+                buffer,
+                content_type='application/pdf',
+                as_attachment=True,
+                filename=f"SentinAL_Case_Report_{violation.id}.pdf"
+            )
+            # FileResponse takes ownership of the buffer and closes it
+            # after streaming is complete, so we set buffer=None to
+            # prevent the finally block from double-closing.
+            buffer = None
+            return response
+
+        except RuntimeError as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"PDF generation failed: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        finally:
+            # Explicit cleanup: close buffer if FileResponse didn't take ownership
+            if buffer is not None:
+                buffer.close()
+
+
+class AutoResolveViolationView(APIView):
+    """
+    Automated Health Check Endpoint for a single violation:
+    Pings the enforced target URL to detect if the pirate site is taken down or modified.
+    If down/unreachable/modified, marks violation status as RESOLVED.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request, pk):
+        violation = get_object_or_404(Violation, pk=pk)
+        result = auto_resolve_violation(violation)
+        return Response(result, status=status.HTTP_200_OK)
+
+    def get(self, request, pk):
+        violation = get_object_or_404(Violation, pk=pk)
+        result = auto_resolve_violation(violation)
+        return Response(result, status=status.HTTP_200_OK)
+
+
+class BatchAutoResolveView(APIView):
+    """
+    Batch health check endpoint: Checks all currently ENFORCED violations
+    to see if any have been taken down.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        enforced_violations = Violation.objects.filter(status='ENFORCED')
+        results = []
+        resolved_count = 0
+
+        for v in enforced_violations:
+            res = auto_resolve_violation(v)
+            results.append(res)
+            if res.get("resolved"):
+                resolved_count += 1
+
+        return Response({
+            "total_checked": len(results),
+            "resolved_count": resolved_count,
+            "results": results
+        }, status=status.HTTP_200_OK)
+
+    def get(self, request):
+        return self.post(request)

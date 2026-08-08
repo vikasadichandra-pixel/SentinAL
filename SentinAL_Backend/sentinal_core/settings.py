@@ -62,6 +62,7 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'enforce': '1000/hour',
         'report': '1000/minute',
+        'export_report': '30/minute',
     },
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 25,

@@ -6,8 +6,11 @@ export const authHeaders = {
   "Authorization": `Token ${API_TOKEN}`
 };
 
-export async function fetchViolations() {
-  const res = await fetch(`${API_BASE}/violations/`, { headers: authHeaders });
+export async function fetchViolations(signal) {
+  const res = await fetch(`${API_BASE}/violations/`, { 
+    headers: authHeaders,
+    signal 
+  });
 
   if (!res.ok) throw new Error("Failed to fetch violations");
 

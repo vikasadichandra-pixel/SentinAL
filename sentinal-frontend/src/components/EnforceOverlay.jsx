@@ -43,14 +43,11 @@ export default function EnforceOverlay({ enforceState, onDismiss }) {
       return;
     }
 
-    // Fresh cinematic sequence: crisp, fast 1.65s flow
-    setPhase('bleeding');
+    // Since the 3D globe nuclear blast just finished, open the notice with a crisp 350ms flash
+    setPhase('flash');
+    const t1 = setTimeout(() => setPhase('notice'), 350);
 
-    const t1 = setTimeout(() => setPhase('washing'), 1000);
-    const t2 = setTimeout(() => setPhase('flash'), 1500);
-    const t3 = setTimeout(() => setPhase('notice'), 1650);
-
-    timersRef.current = [t1, t2, t3];
+    timersRef.current = [t1];
 
     return () => timersRef.current.forEach(clearTimeout);
   }, [enforceState?.active, isDirect]);

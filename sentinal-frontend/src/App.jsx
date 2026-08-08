@@ -1,11 +1,15 @@
-import React, { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useMemo, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import useViolations from "./hooks/useViolations";
 import LiveThreatLog from "./components/LiveThreatLog";
 import MapVisualizer from "./components/MapVisualizer";
 import ActionConsole from "./components/ActionConsole";
-import EnforceOverlay from "./components/EnforceOverlay";
+import RiskFilterToolbar from "./components/RiskFilterToolbar";
 import { getCoordsForLocation } from "./utils/geo";
+
+// Lazy-loaded heavy modal overlays for code-splitting & 60fps performance
+const EnforceOverlay = lazy(() => import("./components/EnforceOverlay"));
+const ThreatHistoryModal = lazy(() => import("./components/ThreatHistoryModal"));
 
 // ─── Panel Animation Variants (Spring Physics Side-Zoom) ───
 const leftPanelVariants = {
@@ -86,7 +90,61 @@ export default function App() {
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
   const [globeReady, setGlobeReady] = useState(false);
-  const { violations, loading, error } = useViolations();
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const { violations, loading, error, latencyMs } = useViolations();
+
+  // ─── Advanced Bounty: Filter State (Set<string> for O(1) toggle) ───
+  const [riskFilters, setRiskFilters] = useState(() => new Set());
+  const [statusFilters, setStatusFilters] = useState(() => new Set());
+  const [labelFilters, setLabelFilters] = useState(() => new Set());
+
+  const handleRiskToggle = useCallback((key) => {
+    setRiskFilters((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }, []);
+
+  const handleStatusToggle = useCallback((key) => {
+    setStatusFilters((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }, []);
+
+  const handleLabelToggle = useCallback((key) => {
+    setLabelFilters((prev) => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }, []);
+
+  const handleFilterReset = useCallback(() => {
+    setRiskFilters(new Set());
+    setStatusFilters(new Set());
+    setLabelFilters(new Set());
+  }, []);
+
+  // ─── Advanced Bounty: Filtered Violations (useMemo for performance) ───
+  const filteredViolations = useMemo(() => {
+    if (!violations) return [];
+    const hasRisk = riskFilters.size > 0;
+    const hasStatus = statusFilters.size > 0;
+    const hasLabel = labelFilters.size > 0;
+
+    // Fast path: no filters active
+    if (!hasRisk && !hasStatus && !hasLabel) return violations;
+
+    return violations.filter((v) => {
+      if (hasRisk && !riskFilters.has(v.breach_type)) return false;
+      if (hasStatus && !statusFilters.has(v.status)) return false;
+      if (hasLabel && !labelFilters.has(v.investigation_label)) return false;
+      return true;
+    });
+  }, [violations, riskFilters, statusFilters, labelFilters]);
 
   // Trigger HUD & side panels entrance smoothly ONLY after the 3D globe formation animation ends (~2.2s)
   const handleGlobeFormationComplete = useCallback(() => {
@@ -120,9 +178,11 @@ export default function App() {
   });
   const [explosionTarget, setExplosionTarget] = useState(null);
   const [neutralizedCount, setNeutralizedCount] = useState(0);
+  const [blastAlert, setBlastAlert] = useState(null);
 
   const openCount = useMemo(() => (violations ? violations.filter(v => v.status === 'OPEN').length : 0), [violations]);
   const enforcedCount = useMemo(() => (violations ? violations.filter(v => v.status === 'ENFORCED').length : 0), [violations]);
+  const resolvedCount = useMemo(() => (violations ? violations.filter(v => v.status === 'RESOLVED').length : 0), [violations]);
 
   // ─── Selecting a threat card in the log auto-opens the console ───
   const handleSelectViolation = useCallback((v) => {
@@ -130,29 +190,49 @@ export default function App() {
     setShowRight(true);
   }, []);
 
-  // ─── Handle Enforce Success — triggers the cinematic sequence ───
+  const handleStatusUpdated = useCallback((updatedViolation) => {
+    setSelectedViolation(updatedViolation);
+  }, []);
+
+  // ─── Handle Enforce Success — triggers nuclear globe blast, then presents enforcement overlay ───
   const handleEnforceSuccess = useCallback(({ pdfUrl, violation, buttonRect, directNotice }) => {
-    // 1. Trigger globe explosion at the threat's coordinates (if fresh enforce)
     if (!directNotice) {
+      // 1. Trigger 3D Globe Nuclear Blast
       const locationCode = violation?.location_code || violation?.location;
       const coords = getCoordsForLocation(locationCode);
       if (coords) {
         setExplosionTarget({ lat: coords.lat, lng: coords.lng });
-        // Clear explosion target after it completes
-        setTimeout(() => setExplosionTarget(null), 2000);
       }
-      // Increment neutralized counter
       setNeutralizedCount(prev => prev + 1);
-    }
 
-    // 2. Activate the overlay
-    setEnforceState({
-      active: true,
-      pdfUrl: pdfUrl,
-      violation: violation,
-      buttonRect: buttonRect,
-      directNotice: !!directNotice,
-    });
+      // 2. Display tactical HUD blast alert banner
+      setBlastAlert({
+        asset: violation?.asset_name || 'TARGET THREAT',
+        node: violation?.location || 'GLOBAL',
+      });
+
+      // 3. WAIT FOR 3D NUCLEAR BLAST ANIMATION TO COMPLETE (~2.2s) BEFORE SHOWING ENFORCEMENT PANEL
+      setTimeout(() => {
+        setBlastAlert(null);
+        setExplosionTarget(null);
+        setEnforceState({
+          active: true,
+          pdfUrl: pdfUrl,
+          violation: violation,
+          buttonRect: buttonRect,
+          directNotice: false,
+        });
+      }, 2200);
+    } else {
+      // Direct notice click: opens immediately
+      setEnforceState({
+        active: true,
+        pdfUrl: pdfUrl,
+        violation: violation,
+        buttonRect: buttonRect,
+        directNotice: true,
+      });
+    }
   }, []);
 
   // ─── Handle Enforce Overlay Dismiss — return to dashboard ───
@@ -168,6 +248,31 @@ export default function App() {
 
   return (
     <div className="relative w-screen h-screen bg-black text-white overflow-hidden select-none font-mono scanline-sweep">
+
+      {/* 💥 TACTICAL NUCLEAR ENFORCEMENT HUD ALERT */}
+      <AnimatePresence>
+        {blastAlert && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.85, y: -24 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 1.05, y: -28 }}
+            transition={{ duration: 0.2 }}
+            className="absolute top-16 left-1/2 -translate-x-1/2 z-50 pointer-events-none flex flex-col items-center"
+          >
+            <div className="px-6 py-2.5 rounded-lg bg-red-950/90 border border-red-500/80 shadow-[0_0_35px_rgba(239,68,68,0.7)] backdrop-blur-md flex items-center gap-3">
+              <span className="text-xl animate-bounce">⚡</span>
+              <div>
+                <div className="text-[12px] font-black tracking-widest text-red-100 uppercase animate-pulse">
+                  NUCLEAR ENFORCEMENT PROTOCOL DEPLOYED
+                </div>
+                <div className="text-[10px] text-amber-300 font-mono">
+                  TARGET: {blastAlert.asset} [{blastAlert.node}] &mdash; KINETIC TAKEDOWN IN PROGRESS
+                </div>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ☀️ ATMOSPHERIC GLOW BACKDROP */}
       <div
@@ -191,6 +296,22 @@ export default function App() {
             SENTINAL <span className="text-red-500">//</span> ENFORCEMENT ENGINE
           </span>
         </div>
+
+        {/* Center: Threat History & Audit Log Trigger */}
+        <motion.button
+          data-testid="history-menu-btn"
+          onClick={() => setShowHistoryModal(true)}
+          whileHover={{ scale: 1.04 }}
+          whileTap={{ scale: 0.96 }}
+          className="pointer-events-auto flex items-center gap-2 bg-zinc-950/80 hover:bg-zinc-900/90 border border-zinc-800 hover:border-red-500/60 hover:text-red-400 text-zinc-300 px-3.5 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wider backdrop-blur-xl shadow-lg transition-all cursor-pointer group"
+          title="Open Threat History & Audit Log"
+        >
+          <span className="text-red-500 text-sm font-black">▤</span>
+          <span>THREAT HISTORY</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-400 font-mono font-bold">
+            {violations ? violations.length : 0}
+          </span>
+        </motion.button>
 
         {/* System Telemetry Tag */}
         <div className="pointer-events-auto flex items-center gap-4 bg-zinc-950/75 backdrop-blur-xl px-4 py-2 rounded-lg border border-zinc-800/80 text-xs text-zinc-400">
@@ -240,9 +361,20 @@ export default function App() {
                   </button>
                 </div>
 
+                {/* ── Advanced Bounty: Risk Filter Toolbar ── */}
+                <RiskFilterToolbar
+                  riskFilters={riskFilters}
+                  statusFilters={statusFilters}
+                  labelFilters={labelFilters}
+                  onRiskToggle={handleRiskToggle}
+                  onStatusToggle={handleStatusToggle}
+                  onLabelToggle={handleLabelToggle}
+                  onReset={handleFilterReset}
+                />
+
                 <div className="flex-1 overflow-hidden">
                   <LiveThreatLog
-                    violations={violations}
+                    violations={filteredViolations}
                     selectedViolation={selectedViolation}
                     loading={loading}
                     error={error}
@@ -298,11 +430,12 @@ export default function App() {
                   </span>
                 </div>
 
-                <div className="flex-1 overflow-hidden">
+                <div className="flex-1 overflow-hidden overflow-y-auto">
                   <ActionConsole
                     selectedViolation={selectedViolation}
                     isLoading={loading}
                     onEnforceSuccess={handleEnforceSuccess}
+                    onStatusUpdated={handleStatusUpdated}
                   />
                 </div>
               </div>
@@ -340,7 +473,11 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-zinc-500">ENFORCED:</span>
-            <span className="font-bold text-emerald-400">{enforcedCount}</span>
+            <span className="font-bold text-amber-400">{enforcedCount}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-zinc-500">RESOLVED:</span>
+            <span className="font-bold text-emerald-400">{resolvedCount}</span>
           </div>
           <div className="flex items-center gap-2">
             <span className="text-zinc-500">GEOFENCE GUARD:</span>
@@ -356,16 +493,31 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-4 text-zinc-500">
-          <span>LATENCY: <span className="text-zinc-300">24ms</span></span>
+          <span>LATENCY: <span className="text-zinc-300">{latencyMs ?? 24}ms</span></span>
           <span>CONFIDENCE: <span className="text-emerald-400">99.4%</span></span>
         </div>
       </motion.footer>
 
       {/* 🔴 ENFORCE TAKEDOWN CINEMATIC OVERLAY */}
-      <EnforceOverlay
-        enforceState={enforceState}
-        onDismiss={handleEnforceDismiss}
-      />
+      <Suspense fallback={null}>
+        {enforceState?.active && (
+          <EnforceOverlay
+            enforceState={enforceState}
+            onDismiss={handleEnforceDismiss}
+          />
+        )}
+      </Suspense>
+
+      {/* 📜 THREAT HISTORY & AUDIT LOG MODAL */}
+      <Suspense fallback={null}>
+        {showHistoryModal && (
+          <ThreatHistoryModal
+            isOpen={showHistoryModal}
+            onClose={() => setShowHistoryModal(false)}
+            violations={violations}
+          />
+        )}
+      </Suspense>
 
     </div>
   );

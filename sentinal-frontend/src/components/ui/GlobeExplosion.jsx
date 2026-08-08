@@ -1,47 +1,67 @@
-import { useRef, useMemo, useEffect } from "react";
+import React, { useRef, useMemo, useEffect } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { polar2Cartesian } from "../../utils/geoDots";
 
-const PARTICLE_COUNT = 80;
-const LIFETIME = 1.5; // seconds
+const PARTICLE_COUNT = 240;
+const LIFETIME = 2.2; // seconds of cinematic nuclear blast
 
 /**
- * GlobeExplosion — GPU-friendly particle burst at a specific lat/lng on the globe.
+ * GlobeExplosion — Nuclear Blast Engine on the 3D Globe.
  *
- * Rendered inside the R3F Canvas. When `target` changes from null to { lat, lng },
- * 80 particles burst outward along the surface normal with staggered lifetimes.
- * All position math runs CPU-side in useFrame (80 particles = negligible cost).
- * Single draw call via BufferGeometry + PointsMaterial with additive blending.
+ * Features:
+ * 1. Expanding Hyper-Luminous Nuclear Fireball (White -> Solar Yellow -> Crimson).
+ * 2. Supersonic Atmospheric Shockwave Rings radiating across the globe surface.
+ * 3. 240+ High-Velocity Plasma Debris Particles & Mushroom Plume with Vertex Colors.
  *
  * @param {{ lat: number, lng: number } | null} target - The explosion origin
  * @param {Function} onComplete - Called when the explosion finishes
  */
 export default function GlobeExplosion({ target, onComplete }) {
+  const groupRef = useRef();
+  const fireballRef = useRef();
+  const ring1Ref = useRef();
+  const ring2Ref = useRef();
   const pointsRef = useRef();
+  const lightRef = useRef();
+
   const startTimeRef = useRef(null);
   const activeRef = useRef(false);
   const completedRef = useRef(false);
 
-  // Pre-allocate all buffers once (never re-created)
+  // Pre-allocate particle buffers (never re-allocated per render)
   const buffers = useMemo(() => ({
     positions: new Float32Array(PARTICLE_COUNT * 3),
     velocities: new Float32Array(PARTICLE_COUNT * 3),
+    colors: new Float32Array(PARTICLE_COUNT * 3),
     lifetimes: new Float32Array(PARTICLE_COUNT),
+    baseSizes: new Float32Array(PARTICLE_COUNT),
   }), []);
 
-  // Initialize explosion when target changes
+  // Compute orientation vectors for shockwave rings & particle dispersion
+  const orientation = useMemo(() => {
+    if (!target) return null;
+    const origin = polar2Cartesian(target.lat, target.lng, 101.5);
+    const normal = new THREE.Vector3(origin.x, origin.y, origin.z).normalize();
+
+    // Compute quaternion to orient shockwave rings flat on the globe surface
+    const up = new THREE.Vector3(0, 0, 1);
+    const quaternion = new THREE.Quaternion().setFromUnitVectors(up, normal);
+
+    return { origin, normal, quaternion };
+  }, [target]);
+
+  // Initialize nuclear explosion when target is set
   useEffect(() => {
-    if (!target) {
+    if (!target || !orientation) {
       activeRef.current = false;
       completedRef.current = false;
       return;
     }
 
-    const origin = polar2Cartesian(target.lat, target.lng, 101);
-    const normal = new THREE.Vector3(origin.x, origin.y, origin.z).normalize();
+    const { origin, normal } = orientation;
 
-    // Create two tangent vectors for spread distribution
+    // Tangent vectors for spherical spread
     const tangent1 = new THREE.Vector3();
     const tangent2 = new THREE.Vector3();
     if (Math.abs(normal.y) < 0.99) {
@@ -51,21 +71,22 @@ export default function GlobeExplosion({ target, onComplete }) {
     }
     tangent2.crossVectors(normal, tangent1).normalize();
 
+    // Initialize 240 particles
     for (let i = 0; i < PARTICLE_COUNT; i++) {
-      // Start at origin
       buffers.positions[i * 3] = origin.x;
       buffers.positions[i * 3 + 1] = origin.y;
       buffers.positions[i * 3 + 2] = origin.z;
 
-      // Random velocity: mostly outward along normal, with tangent spread
-      const speed = 15 + Math.random() * 55;
-      const spreadAngle = (Math.random() - 0.5) * 1.2;
-      const spreadAngle2 = (Math.random() - 0.5) * 1.2;
+      // 40% mushroom plume upward along normal, 60% radial high-velocity ejecta
+      const isPlume = i < PARTICLE_COUNT * 0.4;
+      const speed = isPlume ? (30 + Math.random() * 65) : (18 + Math.random() * 75);
+      const spread1 = (Math.random() - 0.5) * (isPlume ? 0.6 : 1.8);
+      const spread2 = (Math.random() - 0.5) * (isPlume ? 0.6 : 1.8);
 
       const dir = new THREE.Vector3()
         .copy(normal)
-        .addScaledVector(tangent1, Math.sin(spreadAngle) * 0.7)
-        .addScaledVector(tangent2, Math.sin(spreadAngle2) * 0.7)
+        .addScaledVector(tangent1, spread1)
+        .addScaledVector(tangent2, spread2)
         .normalize()
         .multiplyScalar(speed);
 
@@ -73,29 +94,59 @@ export default function GlobeExplosion({ target, onComplete }) {
       buffers.velocities[i * 3 + 1] = dir.y;
       buffers.velocities[i * 3 + 2] = dir.z;
 
-      buffers.lifetimes[i] = 0.4 + Math.random() * 1.0;
+      buffers.lifetimes[i] = 0.8 + Math.random() * 1.4;
+      buffers.baseSizes[i] = 2.5 + Math.random() * 4.5;
+
+      // Vertex color distribution (White-hot -> Solar Yellow -> Fiery Orange -> Crimson)
+      const colorRand = Math.random();
+      if (colorRand < 0.25) {
+        // Blinding white-hot core
+        buffers.colors[i * 3] = 1.0;
+        buffers.colors[i * 3 + 1] = 1.0;
+        buffers.colors[i * 3 + 2] = 1.0;
+      } else if (colorRand < 0.55) {
+        // Solar nuclear yellow
+        buffers.colors[i * 3] = 1.0;
+        buffers.colors[i * 3 + 1] = 0.85;
+        buffers.colors[i * 3 + 2] = 0.1;
+      } else if (colorRand < 0.85) {
+        // Plasma flame orange
+        buffers.colors[i * 3] = 1.0;
+        buffers.colors[i * 3 + 1] = 0.3;
+        buffers.colors[i * 3 + 2] = 0.0;
+      } else {
+        // Deep crimson / laser red
+        buffers.colors[i * 3] = 0.95;
+        buffers.colors[i * 3 + 1] = 0.05;
+        buffers.colors[i * 3 + 2] = 0.15;
+      }
     }
 
     startTimeRef.current = performance.now();
     activeRef.current = true;
     completedRef.current = false;
 
-    // Force initial position update
+    // Reset geometry attributes
     if (pointsRef.current) {
       const posAttr = pointsRef.current.geometry.attributes.position;
       posAttr.array.set(buffers.positions);
       posAttr.needsUpdate = true;
-    }
-  }, [target, buffers]);
 
-  // Per-frame particle animation
+      const colAttr = pointsRef.current.geometry.attributes.color;
+      colAttr.array.set(buffers.colors);
+      colAttr.needsUpdate = true;
+    }
+  }, [target, orientation, buffers]);
+
+  // Frame animation loop
   useFrame(() => {
-    if (!activeRef.current || !pointsRef.current || !startTimeRef.current) return;
+    if (!activeRef.current || !startTimeRef.current || !orientation) return;
 
     const elapsed = (performance.now() - startTimeRef.current) / 1000;
+    const progress = Math.min(1, elapsed / LIFETIME);
 
-    // Check if explosion is finished
-    if (elapsed > LIFETIME) {
+    // End condition
+    if (elapsed >= LIFETIME) {
       if (!completedRef.current) {
         completedRef.current = true;
         activeRef.current = false;
@@ -104,56 +155,142 @@ export default function GlobeExplosion({ target, onComplete }) {
       return;
     }
 
-    const posArr = pointsRef.current.geometry.attributes.position.array;
-    const dt = Math.min(1 / 30, 0.033); // Cap delta to prevent jumps
+    const dt = Math.min(1 / 30, 0.033);
 
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      // Skip dead particles
-      if (elapsed > buffers.lifetimes[i]) continue;
-
-      const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
-
-      // Update position
-      posArr[ix] += buffers.velocities[ix] * dt;
-      posArr[iy] += buffers.velocities[iy] * dt;
-      posArr[iz] += buffers.velocities[iz] * dt;
-
-      // Drag/deceleration
-      buffers.velocities[ix] *= 0.97;
-      buffers.velocities[iy] *= 0.97;
-      buffers.velocities[iz] *= 0.97;
+    // ── 1. Nuclear Core Fireball Animation ──
+    if (fireballRef.current) {
+      // Starts at 0, rapidly explodes to max scale at t=0.35s, then decays & dissipates
+      const fireballScale = progress < 0.3
+        ? (progress / 0.3) * 14
+        : Math.max(0.1, (1 - (progress - 0.3) / 0.7) * 14);
+      fireballRef.current.scale.set(fireballScale, fireballScale, fireballScale);
+      fireballRef.current.material.opacity = Math.max(0, 1 - Math.pow(progress, 0.8));
     }
 
-    pointsRef.current.geometry.attributes.position.needsUpdate = true;
+    // ── 2. Primary Shockwave Ring ──
+    if (ring1Ref.current) {
+      const ringScale = Math.min(45, progress * 48);
+      ring1Ref.current.scale.set(ringScale, ringScale, ringScale);
+      ring1Ref.current.material.opacity = Math.max(0, (1 - Math.pow(progress, 1.4)) * 0.9);
+    }
 
-    // Fade opacity over lifetime
-    const progress = elapsed / LIFETIME;
-    pointsRef.current.material.opacity = Math.max(0, 1 - progress * progress);
-    // Size decreases over time
-    pointsRef.current.material.size = 3.5 * (1 - progress * 0.6);
+    // ── 3. Secondary Supersonic Shockwave Ring (Lagged by 0.15s) ──
+    if (ring2Ref.current) {
+      const lagProgress = Math.max(0, progress - 0.1);
+      const ring2Scale = Math.min(36, lagProgress * 42);
+      ring2Ref.current.scale.set(ring2Scale, ring2Scale, ring2Scale);
+      ring2Ref.current.material.opacity = Math.max(0, (1 - Math.pow(lagProgress, 1.2)) * 0.75);
+    }
+
+    // ── 4. Dynamic Blast Flash Light ──
+    if (lightRef.current) {
+      lightRef.current.intensity = Math.max(0, (1 - Math.pow(progress, 0.6)) * 40);
+    }
+
+    // ── 5. Particle Physics & Turbulence ──
+    if (pointsRef.current) {
+      const posArr = pointsRef.current.geometry.attributes.position.array;
+
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        if (elapsed > buffers.lifetimes[i]) continue;
+
+        const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
+
+        posArr[ix] += buffers.velocities[ix] * dt;
+        posArr[iy] += buffers.velocities[iy] * dt;
+        posArr[iz] += buffers.velocities[iz] * dt;
+
+        // Aerodynamic drag
+        buffers.velocities[ix] *= 0.96;
+        buffers.velocities[iy] *= 0.96;
+        buffers.velocities[iz] *= 0.96;
+      }
+
+      pointsRef.current.geometry.attributes.position.needsUpdate = true;
+      pointsRef.current.material.opacity = Math.max(0, 1 - Math.pow(progress, 1.5));
+      pointsRef.current.material.size = Math.max(1, 4.5 * (1 - progress * 0.5));
+    }
   });
 
-  if (!target || !activeRef.current) return null;
+  if (!target || !activeRef.current || !orientation) return null;
+
+  const { origin, quaternion } = orientation;
 
   return (
-    <points ref={pointsRef}>
-      <bufferGeometry>
-        <bufferAttribute
-          attach="attributes-position"
-          count={PARTICLE_COUNT}
-          array={buffers.positions}
-          itemSize={3}
-        />
-      </bufferGeometry>
-      <pointsMaterial
-        size={3.5}
-        color="#ff3333"
-        transparent
-        opacity={1}
-        blending={THREE.AdditiveBlending}
-        depthWrite={false}
-        sizeAttenuation
+    <group ref={groupRef} position={[origin.x, origin.y, origin.z]}>
+      {/* 💥 Point Light Flash */}
+      <pointLight
+        ref={lightRef}
+        color="#ff7733"
+        distance={250}
+        intensity={35}
+        decay={2}
       />
-    </points>
+
+      {/* 🔴 Core Nuclear Fireball Sphere */}
+      <mesh ref={fireballRef}>
+        <sphereGeometry args={[1, 24, 24]} />
+        <meshBasicMaterial
+          color="#ff4411"
+          transparent
+          opacity={1}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* ⚪ Shockwave Ring 1 (White-Hot Atmospheric Front) */}
+      <mesh ref={ring1Ref} quaternion={quaternion}>
+        <ringGeometry args={[0.85, 1.0, 48]} />
+        <meshBasicMaterial
+          color="#ffffff"
+          side={THREE.DoubleSide}
+          transparent
+          opacity={0.9}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* 🟠 Shockwave Ring 2 (Fiery Plasma Shockwave) */}
+      <mesh ref={ring2Ref} quaternion={quaternion}>
+        <ringGeometry args={[0.7, 0.95, 48]} />
+        <meshBasicMaterial
+          color="#ff5500"
+          side={THREE.DoubleSide}
+          transparent
+          opacity={0.8}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+        />
+      </mesh>
+
+      {/* ✨ Multi-Color Plasma Particles & Mushroom Debris */}
+      <points ref={pointsRef} position={[-origin.x, -origin.y, -origin.z]}>
+        <bufferGeometry>
+          <bufferAttribute
+            attach="attributes-position"
+            count={PARTICLE_COUNT}
+            array={buffers.positions}
+            itemSize={3}
+          />
+          <bufferAttribute
+            attach="attributes-color"
+            count={PARTICLE_COUNT}
+            array={buffers.colors}
+            itemSize={3}
+          />
+        </bufferGeometry>
+        <pointsMaterial
+          size={4.5}
+          vertexColors
+          transparent
+          opacity={1}
+          blending={THREE.AdditiveBlending}
+          depthWrite={false}
+          sizeAttenuation
+        />
+      </points>
+    </group>
   );
 }

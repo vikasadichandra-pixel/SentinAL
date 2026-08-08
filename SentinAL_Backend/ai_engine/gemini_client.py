@@ -2,23 +2,32 @@ import os
 import json
 import datetime
 import concurrent.futures
-import google.generativeai as genai
+try:
+    import google.generativeai as genai
+    GENAI_AVAILABLE = True
+except ImportError:
+    genai = None
+    GENAI_AVAILABLE = False
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Configure the API if key is present
 api_key = os.getenv("GEMINI_API_KEY")
-if api_key:
+if api_key and GENAI_AVAILABLE:
     try:
         genai.configure(api_key=api_key)
     except Exception as e:
         print(f"[!] Gemini configure warning: {e}")
 
+_GEMINI_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="gemini-worker")
+
 def parse_contract_pdf(text_content):
     """
     Parses an uploaded legal contract to extract licensing rules.
     """
+    if not GENAI_AVAILABLE:
+        return None
     try:
         prompt = f"""
         You are a legal AI assistant. Extract the following from the contract text as a JSON object:
@@ -36,7 +45,15 @@ def parse_contract_pdf(text_content):
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         
-        clean_text = response.text.replace('```json', '').replace('```', '').strip()
+        raw_text = response.text.strip()
+        # Find JSON object boundaries
+        start_idx = raw_text.find('{')
+        end_idx = raw_text.rfind('}')
+        if start_idx != -1 and end_idx != -1 and end_idx >= start_idx:
+            clean_text = raw_text[start_idx:end_idx + 1]
+        else:
+            clean_text = raw_text.replace('```json', '').replace('```', '').strip()
+
         return json.loads(clean_text)
         
     except Exception as e:
@@ -58,15 +75,8 @@ Legal Department / Intellectual Property Protection Division
 100 Century City Plaza, Suite 1400
 Los Angeles, CA 90067
 Email: enforcement@sentinalrights.com
+
 Date: {today_date}
-
-TO:
-Hosting Provider Legal Department / Abuse Division
-{location} Server Hosting Services
-
-RE: URGENT DMCA Cease and Desist / Takedown Notice Pursuant to 17 U.S.C. Section 512
-
-Dear Abuse Department,
 
 SentinAL Rights Management represents the exclusive copyright owners and distribution rights holders for the highly valuable cinematic property titled {asset_name}. We are writing to you in our capacity as the authorized legal representative and intellectual property enforcement agent for the copyright holder. This letter constitutes a formal notification pursuant to the Digital Millennium Copyright Act, codified at 17 U.S.C. Section 512, demanding the immediate removal of unauthorized digital copies of our client's intellectual property.
 
@@ -114,6 +124,8 @@ enforcement@sentinalrights.com"""
     """
 
     def _call_gemini():
+        if not GENAI_AVAILABLE:
+            return None
         for model_name in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]:
             try:
                 model = genai.GenerativeModel(model_name)
@@ -125,13 +137,12 @@ enforcement@sentinalrights.com"""
                 continue
         return None
 
-    # Call Gemini in a thread with a strict 3.5-second timeout
+    # Call Gemini in a worker thread with a strict 3.5-second timeout
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_call_gemini)
-            result = future.result(timeout=3.5)
-            if result:
-                return result
+        future = _GEMINI_EXECUTOR.submit(_call_gemini)
+        result = future.result(timeout=3.5)
+        if result:
+            return result
     except Exception as e:
         print(f"[!] Gemini Notice Generation fallback engaged ({e}). Using enterprise template.")
 

@@ -238,6 +238,13 @@ export const Globe = memo(({ data, onThreatHover, onThreatUnhover }) => {
         .ringRepeatPeriod(900)
         .ringAltitude(0.02);
     }
+
+    return () => {
+      if (globeRef.current) {
+        scene.remove(globeRef.current);
+        globeRef.current = null;
+      }
+    };
   }, [scene, camera]);
 
   const lastDataKeyRef = useRef("");

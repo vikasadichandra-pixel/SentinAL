@@ -1,5 +1,10 @@
 import re
-import cv2
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    cv2 = None
+    CV2_AVAILABLE = False
 import socket
 import ipaddress
 import threading
@@ -14,7 +19,7 @@ PIRATE_TAGS_REGEX = r'(?i)\b(720p|1080p|4k|2160p|hdrip|web-dl|webrip|x264|x265|h
 def is_safe_public_url(url: str) -> bool:
     """
     Prevents Server-Side Request Forgery (SSRF) by verifying that 
-    the target URL resolves ONLY to a public IP address.
+    the target URL resolves ONLY to a public, globally routable IP address.
     """
     try:
         parsed = urlparse(url)
@@ -26,15 +31,19 @@ def is_safe_public_url(url: str) -> bool:
             return False
 
         # Allow local testing environments
-        if hostname in ['localhost', '127.0.0.1']:
+        if hostname.lower() in ['localhost', '127.0.0.1', '::1']:
             return True
 
         ip_str = socket.gethostbyname(hostname)
         ip = ipaddress.ip_address(ip_str)
 
-        # Block private, loopback, link-local, and reserved IP ranges
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
-            print(f"[SECURITY BLOCKED] SSRF Attempt detected for internal IP: {ip_str}")
+        # Allow local testing loopback IP
+        if ip.is_loopback:
+            return True
+
+        # Block anything that is not a globally routable public address
+        if not ip.is_global:
+            print(f"[SECURITY BLOCKED] SSRF attempt detected for non-global IP: {ip_str} ({hostname})")
             return False
 
         return True
@@ -76,6 +85,7 @@ def normalize_title(raw_title: str) -> str:
 def evaluate_url_for_breach(raw_title: str, found_location: str, video_duration_mins: int, video_url: str = None):
     """
     Combines Whitelist, Normalization, Release Date Checks, Geofencing, and Static Video Detection.
+    Optimized with prefetch_related to eliminate N+1 queries.
     """
     # 1. Global Whitelist check
     if video_url and is_domain_whitelisted(video_url):
@@ -83,8 +93,8 @@ def evaluate_url_for_breach(raw_title: str, found_location: str, video_duration_
 
     clean_title = normalize_title(raw_title)
 
-    # 2. Normalized title lookup with word boundary check
-    contracts = Contract.objects.all()
+    # 2. Normalized title lookup with pre-fetched relations
+    contracts = Contract.objects.prefetch_related('allowed_territories').all()
     matched_contract = None
     for contract in contracts:
         c_title = normalize_title(contract.title)
@@ -123,8 +133,8 @@ def evaluate_url_for_breach(raw_title: str, found_location: str, video_duration_
             "reason": "Rights have expired"
         }
 
-    # Check Territory
-    allowed_codes = list(matched_contract.allowed_territories.values_list('code', flat=True))
+    # Check Territory from prefetched allowed_territories
+    allowed_codes = [t.code for t in matched_contract.allowed_territories.all()]
     if found_location not in allowed_codes:
         return {
             "contract": matched_contract,
@@ -135,8 +145,8 @@ def evaluate_url_for_breach(raw_title: str, found_location: str, video_duration_
     return None  # Legitimate stream
 
 
-def is_static_fake_video(video_stream_url: str, timeout_sec: int = 8) -> bool:
-    if not video_stream_url:
+def is_static_fake_video(video_stream_url: str, timeout_sec: int = 6) -> bool:
+    if not CV2_AVAILABLE or not video_stream_url:
         return False
 
     is_direct_video = any(video_stream_url.lower().endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov', '.m3u8', '.webm'])
@@ -146,6 +156,7 @@ def is_static_fake_video(video_stream_url: str, timeout_sec: int = 8) -> bool:
     result = {"value": False}
 
     def _worker():
+        cap = None
         try:
             cap = cv2.VideoCapture(video_stream_url)
             if not cap.isOpened():
@@ -153,7 +164,6 @@ def is_static_fake_video(video_stream_url: str, timeout_sec: int = 8) -> bool:
 
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             if total_frames < 100:
-                cap.release()
                 return
 
             sample_indices = [int(total_frames * 0.2), int(total_frames * 0.5), int(total_frames * 0.8)]
@@ -162,11 +172,9 @@ def is_static_fake_video(video_stream_url: str, timeout_sec: int = 8) -> bool:
             for idx in sample_indices:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
                 ret, frame = cap.read()
-                if ret:
+                if ret and frame is not None:
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     frames.append(gray)
-
-            cap.release()
 
             if len(frames) < 3:
                 return
@@ -178,7 +186,13 @@ def is_static_fake_video(video_stream_url: str, timeout_sec: int = 8) -> bool:
                 result["value"] = True
 
         except Exception as e:
-            print(f"Error analyzing video frames: {e}")
+            print(f"[!] Error analyzing video frames: {e}")
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
@@ -188,3 +202,111 @@ def is_static_fake_video(video_stream_url: str, timeout_sec: int = 8) -> bool:
         return False
 
     return result["value"]
+
+
+def auto_resolve_violation(violation) -> dict:
+    """
+    Automated Threat Health Check & Resolution Engine:
+    Pings the enforced target URL with short 3-second timeout and Connection: close header.
+    Detects if the site has been taken down (connection failure, DNS error, 404, 410, 5xx)
+    or if the pirate content has been replaced/removed (SHA-256 hash mismatch).
+
+    If down/resolved, updates database status to 'RESOLVED' and appends audit trail.
+    """
+    import hashlib
+    import requests
+
+    target_url = violation.url
+    if not target_url:
+        return {
+            "status": violation.status,
+            "resolved": False,
+            "reason": "Missing target URL",
+            "violation_id": violation.id
+        }
+
+    # SSRF verification (allows localhost/loopback for testing, blocks internal private LAN)
+    if not is_safe_public_url(target_url):
+        return {
+            "status": violation.status,
+            "resolved": False,
+            "reason": "Forbidden or unsafe URL target (SSRF blocked)",
+            "violation_id": violation.id
+        }
+
+    is_resolved = False
+    resolution_reason = ""
+    http_code = None
+
+    try:
+        response = requests.get(
+            target_url,
+            timeout=2.5,
+            headers={
+                'Connection': 'close',
+                'User-Agent': 'SentinAL-Security-Auditor/2.0'
+            },
+            allow_redirects=True,
+            stream=True
+        )
+        http_code = response.status_code
+
+        # Criteria 1: 404 Not Found, 410 Gone, or 5xx Server Error (Takedown confirmed)
+        if http_code in [404, 410]:
+            is_resolved = True
+            resolution_reason = f"HTTP {http_code} ({response.reason}) — Pirate page taken down / removed"
+        elif http_code >= 500:
+            is_resolved = True
+            resolution_reason = f"HTTP {http_code} Server Error — Pirate host disabled / dead"
+        elif 200 <= http_code < 400:
+            # Criteria 2: Page returned 200 OK. Check content hash vs evidence hash with bounded chunk read.
+            raw_content = b""
+            for chunk in response.iter_content(chunk_size=8192):
+                raw_content += chunk
+                if len(raw_content) >= 262144:  # Max 256 KB
+                    break
+            current_hash = hashlib.sha256(raw_content).hexdigest()
+
+            if violation.html_hash and current_hash != violation.html_hash:
+                is_resolved = True
+                resolution_reason = "Page content modified — Evidence hash mismatch (Copyright removal confirmed)"
+            else:
+                is_resolved = False
+                resolution_reason = "Target site is still active and serving identical content"
+        else:
+            is_resolved = False
+            resolution_reason = f"HTTP {http_code} — Status unclear, site may still be responsive"
+
+    except requests.exceptions.ConnectionError:
+        is_resolved = True
+        resolution_reason = "Connection refused / Host unreachable — Site taken down"
+    except requests.exceptions.Timeout:
+        is_resolved = True
+        resolution_reason = "Connection timed out (>3s) — Target server unresponsive"
+    except requests.exceptions.RequestException as e:
+        is_resolved = True
+        resolution_reason = f"Network failure ({type(e).__name__}) — Target inaccessible"
+    except Exception as e:
+        is_resolved = True
+        resolution_reason = f"Health check exception ({type(e).__name__}) — Target offline"
+
+    # Update database record if resolved
+    if is_resolved:
+        violation.status = 'RESOLVED'
+        if violation.investigation_label == 'SUSPECTED' or not violation.investigation_label:
+            violation.investigation_label = 'VERIFIED'
+        note_entry = f"[AUTO-RESOLVED: {resolution_reason}]"
+        if violation.investigator_notes:
+            if note_entry not in violation.investigator_notes:
+                violation.investigator_notes = f"{violation.investigator_notes} | {note_entry}".strip()
+        else:
+            violation.investigator_notes = note_entry
+        violation.save(update_fields=['status', 'investigation_label', 'investigator_notes'])
+
+    return {
+        "status": violation.status,
+        "resolved": is_resolved,
+        "reason": resolution_reason,
+        "violation_id": violation.id,
+        "http_status": http_code
+    }

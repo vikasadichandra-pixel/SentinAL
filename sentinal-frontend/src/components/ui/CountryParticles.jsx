@@ -69,7 +69,8 @@ export default function CountryParticles({
         [equatorColor, poleColor, opacity]
     );
 
-    const hoverPoint = useRef(null);
+    const hoverPoint = useRef(new THREE.Vector3());
+    const isHoveringRef = useRef(false);
     const hasCompletedRef = useRef(false);
 
     const { positions, homes, startPositions, normals, aExcite, count } = useMemo(() => {
@@ -123,6 +124,7 @@ export default function CountryParticles({
 
         const arr = geom.attributes.position.array;
         const exciteArr = geom.attributes.aExcite.array;
+        const isHovering = isHoveringRef.current;
         const hp = hoverPoint.current;
         const dt = Math.min(delta, 0.05);
 
@@ -167,7 +169,7 @@ export default function CountryParticles({
         }
 
         // 2. Post-Formation Permanent State: 0% CPU when idle, active only on cursor hover
-        if (!hp) {
+        if (!isHovering) {
             if (!settledRef.current) {
                 for (let i = 0; i < count; i++) {
                     const ix = i * 3, iy = i * 3 + 1, iz = i * 3 + 2;
@@ -244,9 +246,12 @@ export default function CountryParticles({
             </points>
 
             <mesh
-                onPointerMove={(e) => { hoverPoint.current = e.point.clone(); }}
+                onPointerMove={(e) => { 
+                    isHoveringRef.current = true;
+                    hoverPoint.current.copy(e.point); 
+                }}
                 onPointerOut={() => {
-                    hoverPoint.current = null;
+                    isHoveringRef.current = false;
                     settledRef.current = false;
                 }}
             >
