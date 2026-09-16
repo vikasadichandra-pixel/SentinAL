@@ -108,32 +108,109 @@ const HqRippleRings = memo(({ position }) => {
   );
 });
 
-const ThreatMarkerItem = memo(({ item, onThreatHover, onThreatUnhover }) => {
+// ─── Threat Marker Theme Resolver (Matches trajectory colors) ───
+const getMarkerTheme = (item) => {
+  const breach = (item.breachType || "").toUpperCase();
+  const color = (item.baseColor || "").toLowerCase();
+
+  if (
+    breach === "PRE_RELEASE" ||
+    breach === "HIGH" ||
+    color.includes("a855f7") ||
+    color.includes("7e22ce") ||
+    color.includes("purple")
+  ) {
+    return {
+      container: "border-purple-500/65 shadow-[0_0_12px_rgba(168,85,247,0.4)]",
+      location: "text-purple-400 drop-shadow-[0_0_8px_rgba(168,85,247,0.9)]",
+      asset: "bg-purple-950/90 border-purple-500/50 text-purple-200",
+    };
+  }
+
+  if (
+    breach === "TERRITORY" ||
+    breach === "LOW" ||
+    color.includes("ea580c") ||
+    color.includes("f97316") ||
+    color.includes("c2410c") ||
+    color.includes("orange")
+  ) {
+    return {
+      container: "border-orange-500/65 shadow-[0_0_12px_rgba(249,115,22,0.4)]",
+      location: "text-orange-400 drop-shadow-[0_0_8px_rgba(249,115,22,0.9)]",
+      asset: "bg-orange-950/90 border-orange-500/50 text-orange-200",
+    };
+  }
+
+  // Default: Red (PIRACY / MED / etc.)
+  return {
+    container: "border-red-500/65 shadow-[0_0_12px_rgba(239,68,68,0.4)]",
+    location: "text-red-400 drop-shadow-[0_0_8px_rgba(239,68,68,0.9)]",
+    asset: "bg-red-950/90 border-red-500/50 text-red-200",
+  };
+};
+
+const ThreatMarkerItem = memo(({ items, onThreatHover, onThreatUnhover }) => {
   const [isHovered, setIsHovered] = useState(false);
+  const primaryItem = items[0];
 
   const base = useMemo(
-    () => polar2Cartesian(item.endLat || item.lat, item.endLng || item.lng, 101.5),
-    [item.endLat, item.lat, item.endLng, item.lng]
-  );
-  const top = useMemo(
-    () => polar2Cartesian(item.endLat || item.lat, item.endLng || item.lng, 113),
-    [item.endLat, item.lat, item.endLng, item.lng]
+    () => polar2Cartesian(primaryItem.endLat || primaryItem.lat, primaryItem.endLng || primaryItem.lng, 101.5),
+    [primaryItem.endLat, primaryItem.lat, primaryItem.endLng, primaryItem.lng]
   );
 
-  const stemPoints = useMemo(
-    () => [
-      new THREE.Vector3(base.x, base.y, base.z),
-      new THREE.Vector3(top.x, top.y, top.z),
-    ],
-    [base, top]
-  );
+  // Compute forked card positions — each violation gets its own branch
+  const cardBranches = useMemo(() => {
+    const lat = primaryItem.endLat || primaryItem.lat;
+    const lng = primaryItem.endLng || primaryItem.lng;
+    const baseVec = new THREE.Vector3(base.x, base.y, base.z);
 
-  const markerColor = item.baseColor || "#ef4444";
+    if (items.length === 1) {
+      // Single item — straight pin up
+      const topPos = polar2Cartesian(lat, lng, 113);
+      return [{
+        top: topPos,
+        stemPoints: [baseVec.clone(), new THREE.Vector3(topPos.x, topPos.y, topPos.z)],
+        color: items[0].baseColor || "#ef4444",
+      }];
+    }
+
+    // Multiple items — fan out side by side along the globe surface tangent
+    const normal = baseVec.clone().normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+    const tangent = new THREE.Vector3().crossVectors(normal, up).normalize();
+    // Handle pole edge case where cross product with up is near-zero
+    if (tangent.lengthSq() < 0.001) {
+      tangent.crossVectors(normal, new THREE.Vector3(1, 0, 0)).normalize();
+    }
+
+    // Bitangent for vertical separation (perpendicular to both normal and tangent)
+    const bitangent = new THREE.Vector3().crossVectors(normal, tangent).normalize();
+
+    const topCenter = polar2Cartesian(lat, lng, 122);
+    const centerVec = new THREE.Vector3(topCenter.x, topCenter.y, topCenter.z);
+    const spread = 30; // Horizontal units to separate each card
+    const verticalSpread = 10; // Vertical offset per card for extra separation
+    const count = items.length;
+
+    return items.map((item, i) => {
+      const hOffset = (i - (count - 1) / 2) * spread;
+      const vOffset = (i - (count - 1) / 2) * verticalSpread;
+      const pos = centerVec.clone()
+        .add(tangent.clone().multiplyScalar(hOffset))
+        .add(bitangent.clone().multiplyScalar(vOffset));
+      return {
+        top: { x: pos.x, y: pos.y, z: pos.z },
+        stemPoints: [baseVec.clone(), pos.clone()],
+        color: item.baseColor || "#ef4444",
+      };
+    });
+  }, [items, primaryItem, base]);
 
   const handlePointerOver = (e) => {
     e.stopPropagation();
     setIsHovered(true);
-    if (onThreatHover) onThreatHover(item);
+    if (onThreatHover) onThreatHover(primaryItem);
   };
 
   const handlePointerOut = () => {
@@ -153,40 +230,51 @@ const ThreatMarkerItem = memo(({ item, onThreatHover, onThreatUnhover }) => {
         <meshBasicMaterial visible={false} />
       </mesh>
 
-      {/* 3D PIN STEM + 3D HUD TEXT - ONLY APPEARS WHEN HOVERING OVER THREAT RIPPLE */}
+      {/* 3D FORKED PIN STEMS + SIDE-BY-SIDE HUD LABELS — ONLY VISIBLE ON HOVER */}
       {isHovered && (
         <group raycast={() => null}>
-          {/* 3D Laser Pin Line */}
-          <line raycast={() => null}>
-            <bufferGeometry attach="geometry" setFromPoints={stemPoints} />
-            <lineBasicMaterial attach="material" color={markerColor} transparent opacity={0.85} />
-          </line>
+          {cardBranches.map((branch, idx) => {
+            const item = items[idx];
+            const theme = getMarkerTheme(item);
+            return (
+              <group key={item.id || idx}>
+                {/* 3D Laser Stem Line branching from ripple to this card */}
+                <line raycast={() => null}>
+                  <bufferGeometry attach="geometry" setFromPoints={branch.stemPoints} />
+                  <lineBasicMaterial attach="material" color={branch.color} transparent opacity={0.85} />
+                </line>
 
-          {/* 3D Glowing Threat Beacon Dot */}
-          <mesh position={[top.x, top.y, top.z]} raycast={() => null}>
-            <sphereGeometry args={[0.7, 12, 12]} />
-            <meshBasicMaterial color={markerColor} />
-          </mesh>
+                {/* 3D Glowing Beacon Dot at branch tip */}
+                <mesh position={[branch.top.x, branch.top.y, branch.top.z]} raycast={() => null}>
+                  <sphereGeometry args={[0.7, 12, 12]} />
+                  <meshBasicMaterial color={branch.color} />
+                </mesh>
 
-          {/* 3D High-Contrast Callout Label showing Country Name */}
-          <Html
-            position={[top.x, top.y, top.z]}
-            center
-            style={{
-              pointerEvents: "none",
-            }}
-          >
-            <div className="flex items-center gap-1.5 select-none pointer-events-none animate-fadeIn transform -translate-y-3 bg-slate-950/90 border border-red-500/65 backdrop-blur-md px-2 py-0.5 rounded shadow-[0_0_12px_rgba(239,68,68,0.4)]">
-              <span className="text-sm font-bold tracking-wider text-red-400 font-mono uppercase drop-shadow-[0_0_8px_rgba(239,68,68,0.9)] whitespace-nowrap">
-                {item.location}
-              </span>
-              {item.assetName && (
-                <span className="text-[10px] font-semibold text-white tracking-wide bg-red-950/90 border border-red-500/50 px-1.5 py-0.5 rounded text-red-200 shadow-sm whitespace-nowrap">
-                  {item.assetName}
-                </span>
-              )}
-            </div>
-          </Html>
+                {/* Card label at this branch position */}
+                <Html
+                  position={[branch.top.x, branch.top.y, branch.top.z]}
+                  center
+                  style={{ pointerEvents: "none" }}
+                >
+                  <div className={`flex items-center gap-1.5 select-none pointer-events-none animate-fadeIn transform -translate-y-3 bg-slate-950/90 border backdrop-blur-md px-2 py-0.5 rounded ${theme.container}`}>
+                    <span className={`text-sm font-bold tracking-wider font-mono uppercase whitespace-nowrap ${theme.location}`}>
+                      {item.location}
+                    </span>
+                    {item.assetName && (
+                      <span className={`text-[10px] font-semibold tracking-wide border px-1.5 py-0.5 rounded shadow-sm whitespace-nowrap ${theme.asset}`}>
+                        {item.assetName}
+                      </span>
+                    )}
+                    {items.length > 1 && (
+                      <span className={`text-[8px] font-black tracking-widest uppercase whitespace-nowrap ${theme.location}`}>
+                        {item.breachType}
+                      </span>
+                    )}
+                  </div>
+                </Html>
+              </group>
+            );
+          })}
         </group>
       )}
     </group>
@@ -315,6 +403,18 @@ export const Globe = memo(({ data, onThreatHover, onThreatUnhover }) => {
     if (onThreatUnhover) onThreatUnhover();
   };
 
+  // Group threat markers by location so overlapping violations share one ripple ring
+  const groupedMarkers = useMemo(() => {
+    if (!data) return [];
+    const groups = {};
+    data.forEach((item) => {
+      const key = `${(item.endLat || item.lat).toFixed(4)}_${(item.endLng || item.lng).toFixed(4)}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(item);
+    });
+    return Object.values(groups);
+  }, [data]);
+
   return (
     <group>
       {/* ─── 3D Glowing Animated Ripple Rings around Chandigarh HQ ─── */}
@@ -365,11 +465,11 @@ export const Globe = memo(({ data, onThreatHover, onThreatUnhover }) => {
         </group>
       )}
 
-      {/* Threat Target Ripple Markers */}
-      {(data || []).map((item) => (
+      {/* Threat Target Ripple Markers (Grouped by Location) */}
+      {groupedMarkers.map((items, idx) => (
         <ThreatMarkerItem
-          key={item.id || item.order}
-          item={item}
+          key={items.map(i => i.id || i.order).join('-')}
+          items={items}
           onThreatHover={onThreatHover}
           onThreatUnhover={onThreatUnhover}
         />

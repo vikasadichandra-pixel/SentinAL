@@ -310,3 +310,126 @@ def auto_resolve_violation(violation) -> dict:
         "violation_id": violation.id,
         "http_status": http_code
     }
+
+
+def verify_evidence_hash(violation, max_retries: int = 3) -> tuple:
+    """
+    Cryptographically verifies that the live target page content matches the stored evidence hash.
+    Executes up to `max_retries` attempts with backoff and multi-strategy candidate hashing
+    (UTF-8 DOM text fingerprint, raw bytes, and whitespace-normalized DOM text).
+    
+    Returns: (verified: bool, current_hash: str | None, reason: str)
+    """
+    import hashlib
+    import time
+    import requests
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        BeautifulSoup = None
+
+    if not violation or not getattr(violation, 'url', None):
+        return False, None, "Missing target URL on violation record."
+
+    target_url = violation.url
+
+    if not is_safe_public_url(target_url):
+        return False, None, "SSRF Guard: Target URL points to a restricted IP address."
+
+    stored_hash = (getattr(violation, 'html_hash', None) or '').strip().lower()
+    if not stored_hash:
+        return False, None, "No cryptographic evidence hash recorded for this violation."
+
+    last_computed_hash = None
+    last_failure_reason = "Unknown verification error"
+
+    for attempt in range(1, max_retries + 1):
+        if attempt > 1:
+            time.sleep(0.35 * attempt)
+
+        page_source = None
+        raw_bytes = None
+
+        # Strategy 1: Direct HTTP fetch with strict UTF-8 decoding
+        try:
+            resp = requests.get(
+                target_url,
+                timeout=4.0,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SentinAL-Evidence-Auditor/2.0"},
+                allow_redirects=True
+            )
+            if resp.ok:
+                resp.encoding = 'utf-8'
+                page_source = resp.text
+                raw_bytes = resp.content
+            else:
+                last_failure_reason = f"Target host returned HTTP {resp.status_code} ({resp.reason})"
+        except requests.exceptions.ConnectionError:
+            last_failure_reason = "Target host connection refused or unreachable."
+        except requests.exceptions.Timeout:
+            last_failure_reason = "Target server timed out (>4.0s)."
+        except Exception as req_err:
+            last_failure_reason = f"HTTP request failed: {req_err}"
+
+        # Strategy 2: Headless Selenium browser fetch if HTTP failed or produced empty source
+        if not page_source and attempt == max_retries:
+            try:
+                from selenium import webdriver
+                from selenium.webdriver.chrome.options import Options
+                
+                options = Options()
+                options.add_argument("--headless=new")
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+                options.add_argument("--disable-gpu")
+                options.add_argument("--blink-settings=imagesEnabled=false")
+                options.add_argument("--log-level=3")
+
+                driver = webdriver.Chrome(options=options)
+                try:
+                    driver.set_page_load_timeout(6)
+                    driver.get(target_url)
+                    page_source = driver.page_source
+                    if page_source:
+                        raw_bytes = page_source.encode('utf-8')
+                finally:
+                    driver.quit()
+            except Exception as sel_err:
+                print(f"[!] Selenium verification notice for {target_url}: {sel_err}")
+
+        if not page_source:
+            continue
+
+        try:
+            # Multi-Strategy Hash Calculation
+            clean_text = None
+            if BeautifulSoup:
+                soup = BeautifulSoup(page_source, 'html.parser')
+                for element in soup(["script", "style", "iframe", "footer", "nav", "aside"]):
+                    element.extract()
+                clean_text = soup.get_text(strip=True)
+            else:
+                clean_text = re.sub(r'<(script|style|iframe|footer|nav|aside)[^>]*>.*?</\1>', '', page_source, flags=re.DOTALL | re.IGNORECASE)
+                clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+                clean_text = ' '.join(clean_text.split())
+
+            # Generate candidate hashes
+            primary_hash = hashlib.sha256(clean_text.encode('utf-8')).hexdigest().lower()
+            raw_hash = hashlib.sha256(raw_bytes).hexdigest().lower() if raw_bytes else None
+            no_ws_hash = hashlib.sha256(re.sub(r'\s+', '', clean_text).encode('utf-8')).hexdigest().lower()
+
+            last_computed_hash = primary_hash
+
+            # Check if any candidate hash matches stored evidence baseline
+            if primary_hash == stored_hash:
+                return True, primary_hash, f"Cryptographic evidence hash verified successfully on attempt {attempt}/{max_retries}."
+            elif raw_hash and raw_hash == stored_hash:
+                return True, raw_hash, f"Raw cryptographic evidence hash verified successfully on attempt {attempt}/{max_retries}."
+            elif no_ws_hash == stored_hash:
+                return True, no_ws_hash, f"Normalized evidence hash verified successfully on attempt {attempt}/{max_retries}."
+            else:
+                last_failure_reason = f"Computed {primary_hash[:10]}... vs stored {stored_hash[:10]}..."
+        except Exception as parse_err:
+            last_failure_reason = f"Hash computation error: {parse_err}"
+
+    return False, last_computed_hash, f"Evidence hash mismatch after {max_retries} verification passes ({last_failure_reason})."

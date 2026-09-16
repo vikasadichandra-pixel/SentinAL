@@ -39,7 +39,7 @@ from rest_framework.parsers import MultiPartParser
 from ai_engine.gemini_client import parse_contract_pdf, draft_legal_notice
 from .models import Contract, Territory, Violation
 from .serializers import ContractSerializer, ViolationSerializer, CrawlerReportSerializer
-from .utils import evaluate_url_for_breach, is_safe_public_url, auto_resolve_violation
+from .utils import evaluate_url_for_breach, is_safe_public_url, auto_resolve_violation, verify_evidence_hash
 from utils.pdf_generator import generate_notice_pdf
 
 
@@ -202,6 +202,20 @@ class EnforceViolationView(APIView):
                         "pdf_url": pdf_download_url
                     }, status=status.HTTP_200_OK)
                 
+                # ── EVIDENCE HASH VERIFICATION GATE ──
+                # Taking down / enforcing a violation strictly requires evidence hash verification to pass!
+                verified, current_hash, verify_reason = verify_evidence_hash(violation)
+                if not verified:
+                    return Response({
+                        "status": "error",
+                        "error": f"Enforcement blocked: Evidence verification failed. {verify_reason}",
+                        "message": f"Enforcement blocked: Evidence verification failed. {verify_reason}",
+                        "verified": False,
+                        "stored_hash": violation.html_hash,
+                        "current_hash": current_hash or "",
+                        "reason": verify_reason,
+                    }, status=status.HTTP_400_BAD_REQUEST)
+
                 # Dynamically generate legal notice using Gemini AI
                 try:
                     notice_text = draft_legal_notice(
@@ -221,7 +235,11 @@ class EnforceViolationView(APIView):
                         pass
 
                 violation.status = 'ENFORCED'
-                violation.save()
+                if violation.investigation_label != 'VERIFIED':
+                    violation.investigation_label = 'VERIFIED'
+                    violation.save(update_fields=['status', 'investigation_label'])
+                else:
+                    violation.save(update_fields=['status'])
                 
                 try:
                     pdf_download_url = request.build_absolute_uri(f"/media/notices/{notice_filename}")
@@ -230,7 +248,7 @@ class EnforceViolationView(APIView):
                 
                 return Response({
                     "status": "success", 
-                    "message": "Takedown notice dispatched successfully.",
+                    "message": "Evidence verified. Takedown notice dispatched successfully.",
                     "pdf_url": pdf_download_url
                 }, status=status.HTTP_200_OK)
                 
@@ -300,84 +318,18 @@ class VerifyViolationView(APIView):
 
     def post(self, request, pk):
         violation = get_object_or_404(Violation, pk=pk)
+        verified, current_hash, reason = verify_evidence_hash(violation)
 
-        # SSRF Check
-        if not is_safe_public_url(violation.url):
-            return Response(
-                {"verified": False, "error": "SSRF Guard: Target URL points to a restricted IP address."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        if verified and violation.investigation_label != 'VERIFIED':
+            violation.investigation_label = 'VERIFIED'
+            violation.save(update_fields=['investigation_label'])
 
-        page_source = None
-        driver = None
-
-        # Attempt 1: Fast Headless Browser Fetching with Strict Resource Cleanup
-        try:
-            options = Options()
-            options.add_argument("--headless")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--blink-settings=imagesEnabled=false")
-            options.add_argument("--log-level=3")
-
-            driver = webdriver.Chrome(options=options)
-            driver.set_page_load_timeout(8)
-            driver.set_script_timeout(8)
-            driver.get(violation.url)
-            time.sleep(0.5)
-            page_source = driver.page_source
-        except Exception as chrome_err:
-            print(f"[!] Selenium fetch warning for {violation.url}: {chrome_err}")
-        finally:
-            if driver is not None:
-                try:
-                    driver.quit()
-                except Exception:
-                    pass
-
-        # Attempt 2: High-Speed HTTP Fallback if Selenium is unavailable
-        if not page_source:
-            try:
-                import requests
-                resp = requests.get(violation.url, timeout=5, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                if resp.ok:
-                    page_source = resp.text
-            except Exception as req_err:
-                print(f"[!] HTTP fallback fetch warning: {req_err}")
-
-        if not page_source:
-            return Response(
-                {"verified": False, "error": "Could not re-fetch page via browser or direct HTTP."},
-                status=status.HTTP_502_BAD_GATEWAY
-            )
-
-        try:
-            if BeautifulSoup:
-                soup = BeautifulSoup(page_source, 'html.parser')
-                for element in soup(["script", "style", "iframe", "footer", "nav", "aside"]):
-                    element.extract()
-                clean_text = soup.get_text(strip=True)
-            else:
-                clean_text = re.sub(r'<(script|style|iframe|footer|nav|aside)[^>]*>.*?</\1>', '', page_source, flags=re.DOTALL | re.IGNORECASE)
-                clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
-                clean_text = ' '.join(clean_text.split())
-
-            new_hash = hashlib.sha256(clean_text.encode('utf-8')).hexdigest()
-        except Exception as parse_err:
-            return Response(
-                {"verified": False, "error": f"Failed to compute evidence hash: {parse_err}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-        matches = (new_hash == violation.html_hash)
-        
         return Response({
-            "verified": matches,
+            "verified": verified,
             "stored_hash": violation.html_hash,
-            "current_hash": new_hash,
-            "note": "Page content changed since capture" if not matches else "Hash matches stored evidence",
-        })
+            "current_hash": current_hash or "",
+            "note": reason,
+        }, status=status.HTTP_200_OK)
 
 
 # ═══════════════════════════════════════════════════════════════════

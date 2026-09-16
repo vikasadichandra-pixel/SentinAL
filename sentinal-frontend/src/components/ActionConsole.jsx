@@ -70,11 +70,13 @@ const statusVariants = {
 
 export default function ActionConsole({ selectedViolation, isLoading: externalLoading, onEnforceSuccess, onStatusUpdated }) {
   const [isLoading, setIsLoading] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
   const [takedownAlert, setTakedownAlert] = useState(null);
   const [statusMessage, setStatusMessage] = useState(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [verifiedStatus, setVerifiedStatus] = useState({});
   const enforceBtnRef = useRef(null);
   const exportUrlRef = useRef(null);
 
@@ -105,6 +107,7 @@ export default function ActionConsole({ selectedViolation, isLoading: externalLo
       return;
     }
 
+    setIsVerifying(true);
     setStatusMessage({ type: 'info', text: 'Re-fetching page and verifying SHA-256 Hash...' });
 
     try {
@@ -113,17 +116,34 @@ export default function ActionConsole({ selectedViolation, isLoading: externalLo
         headers: authHeaders,
       });
 
-      if (!response.ok) throw new Error("Server rejected the request");
-
       const result = await response.json();
 
-      setStatusMessage(
-        result.verified
-          ? { type: 'success', text: `✅ Hash confirmed: ${result.current_hash.substring(0, 10)}...` }
-          : { type: 'error', text: `⚠ ${result.note || 'Hash mismatch — evidence may be stale'}` }
-      );
+      if (!response.ok || !result.verified) {
+        setVerifiedStatus(prev => ({ ...prev, [selectedViolation.id]: false }));
+        setStatusMessage({
+          type: 'error',
+          text: `❌ ${result.note || result.error || 'Hash mismatch after 3 verification passes — evidence verification failed. Enforcement locked.'}`
+        });
+        return;
+      }
+
+      setVerifiedStatus(prev => ({ ...prev, [selectedViolation.id]: true }));
+      setStatusMessage({
+        type: 'success',
+        text: `✅ ${result.note || `Hash confirmed: ${result.current_hash ? result.current_hash.substring(0, 10) : ''}... Evidence verified. Enforcement unlocked.`}`
+      });
+
+      if (onStatusUpdated && selectedViolation.investigation_label !== 'VERIFIED') {
+        onStatusUpdated({
+          ...selectedViolation,
+          investigation_label: 'VERIFIED'
+        });
+      }
     } catch (error) {
-      setStatusMessage({ type: 'error', text: '❌ Verification request failed.' });
+      setVerifiedStatus(prev => ({ ...prev, [selectedViolation.id]: false }));
+      setStatusMessage({ type: 'error', text: '❌ Verification request failed. Host unreachable or offline.' });
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -131,6 +151,12 @@ export default function ActionConsole({ selectedViolation, isLoading: externalLo
   const handleEnforce = async () => {
     if (!selectedViolation) {
       setStatusMessage({ type: 'error', text: '⚠ Select a violation first!' });
+      return;
+    }
+
+    // Gate: Enforcement strictly requires verified evidence hash for takedowns
+    if (!isEnforced && !isHashVerified) {
+      setStatusMessage({ type: 'error', text: '🔒 Hash verification required before takedown enforcement.' });
       return;
     }
 
@@ -147,6 +173,9 @@ export default function ActionConsole({ selectedViolation, isLoading: externalLo
       const result = await response.json();
 
       if (!response.ok) {
+        if (result.verified === false) {
+          setVerifiedStatus(prev => ({ ...prev, [selectedViolation.id]: false }));
+        }
         throw new Error(result.error || result.message || "Server rejected the request");
       }
 
@@ -172,7 +201,11 @@ export default function ActionConsole({ selectedViolation, isLoading: externalLo
       }
 
       if (onStatusUpdated) {
-        onStatusUpdated({ ...selectedViolation, status: 'ENFORCED' });
+        onStatusUpdated({
+          ...selectedViolation,
+          status: 'ENFORCED',
+          investigation_label: 'VERIFIED'
+        });
       }
 
       setStatusMessage({ type: 'success', text: `✅ ${result.message}` });
@@ -238,6 +271,12 @@ export default function ActionConsole({ selectedViolation, isLoading: externalLo
   const hasTarget = !!selectedViolation;
   const isEnforced = selectedViolation?.status === 'ENFORCED';
   const isResolved = selectedViolation?.status === 'RESOLVED';
+
+  // Hash is verified if explicitly passed in session, or if already marked VERIFIED (and not explicitly failed)
+  const isHashVerified = hasTarget && (
+    verifiedStatus[selectedViolation.id] === true ||
+    (verifiedStatus[selectedViolation.id] === undefined && selectedViolation.investigation_label === 'VERIFIED')
+  );
 
   return (
     <div className="p-3 space-y-3 bg-zinc-900/90 border border-zinc-800 rounded-lg flex flex-col h-full">
@@ -435,30 +474,49 @@ export default function ActionConsole({ selectedViolation, isLoading: externalLo
         {/* Verify Evidence */}
         <motion.button
           onClick={handleVerify}
-          disabled={!hasTarget || isLoading}
-          whileHover={hasTarget && !isLoading ? { scale: 1.015 } : {}}
-          whileTap={hasTarget && !isLoading ? { scale: 0.98 } : {}}
-          className={`w-full py-2 px-3 text-[10px] font-bold tracking-wider rounded-md transition-all border ${
+          disabled={!hasTarget || isVerifying || isLoading}
+          whileHover={hasTarget && !isVerifying && !isLoading ? { scale: 1.015 } : {}}
+          whileTap={hasTarget && !isVerifying && !isLoading ? { scale: 0.98 } : {}}
+          className={`w-full py-2 px-3 text-[10px] font-bold tracking-wider uppercase rounded-md transition-all border flex items-center justify-center gap-1.5 cursor-pointer ${
             !hasTarget
               ? 'bg-zinc-900 border-zinc-800 text-zinc-600 cursor-not-allowed'
-              : 'bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-200 hover:text-white cursor-pointer shadow-md'
+              : isHashVerified
+              ? 'bg-emerald-950/60 hover:bg-emerald-900/70 border-emerald-500/60 text-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.2)]'
+              : 'bg-zinc-800 hover:bg-zinc-700 border-cyan-600/60 text-cyan-200 hover:text-white shadow-md'
           }`}
         >
-          VERIFY EVIDENCE HASH
+          {isVerifying ? (
+            <span className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+              VERIFYING SHA-256 HASH...
+            </span>
+          ) : isHashVerified ? (
+            <>
+              <span>✓</span>
+              <span>EVIDENCE HASH VERIFIED</span>
+            </>
+          ) : (
+            <>
+              <span>🔍</span>
+              <span>VERIFY EVIDENCE HASH</span>
+            </>
+          )}
         </motion.button>
 
         {/* Enforce Takedown */}
         <motion.button
           ref={enforceBtnRef}
           onClick={handleEnforce}
-          disabled={!hasTarget || isLoading || isResolved}
-          whileHover={hasTarget && !isExecuting && !isLoading && !isResolved ? { scale: 1.02 } : {}}
-          whileTap={hasTarget && !isExecuting && !isLoading && !isResolved ? { scale: 0.94 } : {}}
+          disabled={!hasTarget || isLoading || isResolved || (!isEnforced && !isHashVerified)}
+          whileHover={hasTarget && !isExecuting && !isLoading && !isResolved && (isEnforced || isHashVerified) ? { scale: 1.02 } : {}}
+          whileTap={hasTarget && !isExecuting && !isLoading && !isResolved && (isEnforced || isHashVerified) ? { scale: 0.94 } : {}}
           className={`w-full py-2.5 px-3 text-[10px] font-black tracking-widest uppercase rounded-md transition-all flex justify-center items-center cursor-pointer shadow-lg ${
             isExecuting
               ? 'enforce-btn-executing text-white'
               : !hasTarget || isResolved
               ? 'bg-zinc-900 border border-zinc-800 text-zinc-600 cursor-not-allowed'
+              : !isEnforced && !isHashVerified
+              ? 'bg-zinc-900/90 border border-zinc-800 text-zinc-500 cursor-not-allowed shadow-none'
               : isEnforced
               ? 'bg-gradient-to-r from-red-700 to-red-800 hover:from-red-600 hover:to-red-700 text-white border border-red-500/50 shadow-red-950/50'
               : 'bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white enforce-btn-active border border-red-500/40'
@@ -473,8 +531,10 @@ export default function ActionConsole({ selectedViolation, isLoading: externalLo
             "THREAT RESOLVED (TAKEDOWN COMPLETE)"
           ) : isEnforced ? (
             "VIEW / RE-ISSUE NOTICE"
+          ) : !isHashVerified ? (
+            "🔒 ENFORCE TAKEDOWN (VERIFY HASH FIRST)"
           ) : (
-            "ENFORCE TAKEDOWN"
+            "⚡ ENFORCE TAKEDOWN"
           )}
         </motion.button>
       </div>

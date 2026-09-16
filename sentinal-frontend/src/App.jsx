@@ -135,14 +135,25 @@ export default function App() {
     const hasStatus = statusFilters.size > 0;
     const hasLabel = labelFilters.size > 0;
 
-    // Fast path: no filters active
-    if (!hasRisk && !hasStatus && !hasLabel) return violations;
+    let result = violations;
 
-    return violations.filter((v) => {
-      if (hasRisk && !riskFilters.has(v.breach_type)) return false;
-      if (hasStatus && !statusFilters.has(v.status)) return false;
-      if (hasLabel && !labelFilters.has(v.investigation_label)) return false;
-      return true;
+    // Apply filters if any are active
+    if (hasRisk || hasStatus || hasLabel) {
+      result = result.filter((v) => {
+        if (hasRisk && !riskFilters.has(v.breach_type)) return false;
+        if (hasStatus && !statusFilters.has(v.status)) return false;
+        if (hasLabel && !labelFilters.has(v.investigation_label)) return false;
+        return true;
+      });
+    }
+
+    // Sort: active threats first, enforced/resolved sink to the bottom
+    return [...result].sort((a, b) => {
+      const closedStatuses = new Set(['ENFORCED', 'RESOLVED']);
+      const aIsClosed = closedStatuses.has(a.status);
+      const bIsClosed = closedStatuses.has(b.status);
+      if (aIsClosed === bIsClosed) return 0; // preserve original order among same group
+      return aIsClosed ? 1 : -1; // closed items go to bottom
     });
   }, [violations, riskFilters, statusFilters, labelFilters]);
 

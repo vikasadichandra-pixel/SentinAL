@@ -18,7 +18,7 @@ processes = []
 
 def install_dependencies():
     print("[*] Ensuring required modules are installed...")
-    subprocess.run([PYTHON_EXE, "-m", "pip", "install", "rangehttpserver", "python-dotenv", "-q"])
+    subprocess.run([PYTHON_EXE, "-m", "pip", "install", "rangehttpserver", "python-dotenv", "beautifulsoup4", "selenium", "requests", "-q"])
 
 def start_server(cmd, cwd, name):
     if not os.path.exists(cwd):

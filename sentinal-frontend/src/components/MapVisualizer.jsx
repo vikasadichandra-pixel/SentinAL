@@ -79,8 +79,9 @@ const MapVisualizer = React.memo(({ violations, explosionTarget, onFormationComp
   } = useGlobeRotation(0.5, 4500);
 
   const arcs = useMemo(
-    () =>
-      (violations || [])
+    () => {
+      const rawArcs = (violations || [])
+        .filter((v) => v.status === "OPEN" || !v.status)
         .map((v, index) => {
           const coords = getCoordsForLocation(v.location_code || v.location);
           if (!coords) return null;
@@ -109,7 +110,19 @@ const MapVisualizer = React.memo(({ violations, explosionTarget, onFormationComp
             breachType: v.breach_type || v.type || "THREAT DETECTED",
           };
         })
-        .filter(Boolean),
+        .filter(Boolean);
+
+      // Stagger arc altitudes so overlapping arcs to the same country are visually distinct
+      const locationIndex = {};
+      rawArcs.forEach((arc) => {
+        const key = `${arc.endLat}_${arc.endLng}`;
+        const idx = locationIndex[key] || 0;
+        arc.arcAlt = 0.25 + idx * 0.18;
+        locationIndex[key] = idx + 1;
+      });
+
+      return rawArcs;
+    },
     [violations]
   );
 
