@@ -258,7 +258,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="relative w-screen h-screen bg-black text-white overflow-hidden select-none font-mono scanline-sweep">
+    <div className="relative w-screen h-screen bg-black text-white overflow-hidden select-none font-mono">
 
       {/* 💥 TACTICAL NUCLEAR ENFORCEMENT HUD ALERT */}
       <AnimatePresence>
