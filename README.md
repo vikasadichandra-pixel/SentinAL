@@ -1,4 +1,4 @@
-# SentinAL: Automated IP Protection & Anti-Piracy Enforcement System
+# SentinAL: Automated IP Protection & Anti-Piracy Enforcement System 
 
 SentinAL is an autonomous intellectual property (IP) protection and automated digital rights management (DRM) platform. It monitors web locations for unauthorized streaming distribution, automatically checks findings against legal distribution contracts using Generative AI, and generates legally compliant DMCA cease-and-desist notifications.
 
